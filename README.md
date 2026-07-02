@@ -15,6 +15,13 @@
 - `third_party/renderdoc`：最小 RenderDoc 命令行运行集，用于 `renderdoccmd convert`。
 - `analyzer`：分析脚本，包含 Vulkan/mobile 和 D3D11/PC 两条解析路径。
 
+启动时 `AnalyzeRDC.cmd` 会检查这些运行时是否存在：
+
+- 优先使用仓库内置的 `runtime/python/python.exe`。
+- 优先使用仓库内置的 `third_party/renderdoc/renderdoccmd.exe`。
+- 如果内置文件缺失，会尝试使用系统 PATH 里的 `python` 或 `renderdoccmd.exe`。
+- 如果都找不到，会在命令行里给出修复方式和下载地址。
+
 ## 使用方法
 
 双击：
