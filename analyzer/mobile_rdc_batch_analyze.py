@@ -276,13 +276,13 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
             detail_rows.append(
                 "<tr>"
                 f"<td><code>{html.escape(str(r.get('index_texture') or '-'))}</code></td>"
+                f"<td><code>{html.escape(str(r.get('mesh_name') or ''))}</code></td>"
+                f"<td class='num'>{r.get('draw_index')}</td>"
                 f"<td>{html_texture_list(r.get('textures') or [])}</td>"
                 f"<td class='num'>{r.get('texture_count')}</td>"
-                f"<td class='num'>{r.get('draw_index')}</td>"
                 f"<td class='num'>{r.get('chunk_index')}</td>"
                 f"<td>{html.escape(str(r.get('renderpass') or ''))}</td>"
                 f"<td><code>{html.escape(str(r.get('command') or ''))}</code></td>"
-                f"<td><code>{html.escape(str(r.get('mesh_name') or ''))}</code></td>"
                 f"<td class='num'>{idx_or_vert}</td>"
                 f"<td class='num'>{r.get('instance_count')}</td>"
                 "</tr>"
@@ -300,9 +300,9 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
               <table>
                 <thead>
                   <tr>
-                    <th>Index texture</th><th>Textures</th><th>Texture count</th>
-                    <th>Draw</th><th>chunkIndex</th><th>RenderPass/Marker</th><th>Cmd</th>
-                    <th>Mesh</th><th>idx/verts</th><th>inst</th>
+                    <th>Index texture</th><th>Mesh</th><th>Draw #</th>
+                    <th>Textures</th><th>Texture count</th><th>chunkIndex</th>
+                    <th>RenderPass/Marker</th><th>Cmd</th><th>idx/verts</th><th>inst</th>
                   </tr>
                 </thead>
                 <tbody>{''.join(detail_rows)}</tbody>
@@ -404,16 +404,16 @@ def write_category_detail_md(stem, out_dir, by_category):
             f"- Textured: {sum(1 for r in group if r.get('texture_count'))}",
             f"- `_D` indexed: {sum(1 for r in group if r.get('index_is_d_texture'))}",
             "",
-            "| Draw | chunkIndex | RenderPass | Cmd | idx/verts | inst | Index texture | Texture count | Textures |",
-            "|---:|---:|---:|---|---:|---:|---|---:|---|",
+            "| Index texture | Mesh | Draw # | Textures | Texture count | chunkIndex | RenderPass | Cmd | idx/verts | inst |",
+            "|---|---|---:|---|---:|---:|---|---|---:|---:|",
         ]
         for r in group:
             idx_or_vert = r.get("index_count") or r.get("vertex_count") or 0
             lines.append(
-                f"| {r.get('draw_index')} | {r.get('chunk_index')} | {r.get('renderpass')} | "
-                f"`{r.get('command')}` | {idx_or_vert} | {r.get('instance_count')} | "
-                f"`{r.get('index_texture')}` | {r.get('texture_count')} | "
-                f"{md_texture_list(r.get('textures') or [])} |"
+                f"| `{r.get('index_texture')}` | `{r.get('mesh_name')}` | {r.get('draw_index')} | "
+                f"{md_texture_list(r.get('textures') or [])} | {r.get('texture_count')} | "
+                f"{r.get('chunk_index')} | {r.get('renderpass')} | `{r.get('command')}` | "
+                f"{idx_or_vert} | {r.get('instance_count')} |"
             )
 
     md_path.write_text("\n".join(lines), encoding="utf-8")
