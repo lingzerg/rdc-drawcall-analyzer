@@ -199,6 +199,17 @@ def csv_text(value):
 
 
 def texture_category(row):
+    names = [
+        row.get("mesh_name"),
+        row.get("index_texture"),
+        *(row.get("textures") or []),
+    ]
+    text = " ".join(str(name or "") for name in names).lower()
+    mesh_text = str(row.get("mesh_name") or "").lower()
+    if "hlod" in text:
+        if "brg" in mesh_text and "hlod" in mesh_text:
+            return "PCG HLOD"
+        return "HLOD"
     return row.get("category_by_d_texture") or "unclassified"
 
 
