@@ -275,6 +275,9 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
             idx_or_vert = r.get("index_count") or r.get("vertex_count") or 0
             detail_rows.append(
                 "<tr>"
+                f"<td><code>{html.escape(str(r.get('index_texture') or '-'))}</code></td>"
+                f"<td>{html_texture_list(r.get('textures') or [])}</td>"
+                f"<td class='num'>{r.get('texture_count')}</td>"
                 f"<td class='num'>{r.get('draw_index')}</td>"
                 f"<td class='num'>{r.get('chunk_index')}</td>"
                 f"<td>{html.escape(str(r.get('renderpass') or ''))}</td>"
@@ -282,9 +285,6 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                 f"<td><code>{html.escape(str(r.get('mesh_name') or ''))}</code></td>"
                 f"<td class='num'>{idx_or_vert}</td>"
                 f"<td class='num'>{r.get('instance_count')}</td>"
-                f"<td><code>{html.escape(str(r.get('index_texture') or '-'))}</code></td>"
-                f"<td class='num'>{r.get('texture_count')}</td>"
-                f"<td>{html_texture_list(r.get('textures') or [])}</td>"
                 "</tr>"
             )
         detail_blocks.append(
@@ -300,8 +300,9 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
               <table>
                 <thead>
                   <tr>
+                    <th>Index texture</th><th>Textures</th><th>Texture count</th>
                     <th>Draw</th><th>chunkIndex</th><th>RenderPass/Marker</th><th>Cmd</th>
-                    <th>Mesh</th><th>idx/verts</th><th>inst</th><th>Index texture</th><th>Texture count</th><th>Textures</th>
+                    <th>Mesh</th><th>idx/verts</th><th>inst</th>
                   </tr>
                 </thead>
                 <tbody>{''.join(detail_rows)}</tbody>
