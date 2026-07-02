@@ -55,6 +55,21 @@ def format_eids(rows, limit=80):
     return "; ".join(shown) + suffix
 
 
+def html_eids(rows, label="EID/chunkIndex", limit=16):
+    eids = [eid_value(r) for r in sorted(rows, key=lambda r: r.get("draw_index") or 0)]
+    text = "; ".join(eids)
+    if len(eids) <= limit:
+        return f"<code>{html.escape(text)}</code>"
+    shown = "; ".join(eids[:limit])
+    return (
+        '<details class="eids">'
+        f"<summary>{len(eids)} {html.escape(label)}</summary>"
+        f"<code>{html.escape(shown)}; ...</code>"
+        f"<div><code>{html.escape(text)}</code></div>"
+        "</details>"
+    )
+
+
 def build_renderpass_groups(rows):
     groups = defaultdict(list)
     for row in rows:
@@ -69,6 +84,10 @@ def build_index_texture_groups(rows):
         if tex:
             groups[tex].append(row)
     return sorted(groups.items(), key=lambda kv: len(kv[1]), reverse=True)
+
+
+def aggregate_by_index_texture(rows):
+    return build_index_texture_groups(rows)
 
 
 def find_renderdoccmd(explicit=None):
@@ -323,6 +342,39 @@ def html_draw_detail_header(eid_label="EID/chunkIndex"):
     """
 
 
+def html_texture_aggregate_row(texture, group, eid_label="EID/chunkIndex"):
+    renderpasses = Counter(renderpass_label(r) for r in group).most_common(5)
+    meshes = Counter(r.get("mesh_name") or "-" for r in group).most_common(8)
+    texture_counts = Counter(r.get("texture_count") or 0 for r in group).most_common(3)
+    return (
+        "<tr>"
+        f"<td><code>{html.escape(str(texture or '-'))}</code></td>"
+        f"<td class='num' data-value='{len(group)}'>{len(group)}</td>"
+        f"<td class='num' data-value='{total_vertex_count(group)}'>{total_vertex_count(group):,}</td>"
+        f"<td>{html_eids(group, eid_label)}</td>"
+        f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in meshes))}</td>"
+        f"<td>{html.escape('; '.join(f'{k}:{v}' for k, v in renderpasses))}</td>"
+        f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in texture_counts))}</td>"
+        "</tr>"
+    )
+
+
+def html_texture_aggregate_header(eid_label="EID/chunkIndex"):
+    return f"""
+                <thead>
+                  <tr>
+                    <th data-sort="text">Index texture</th>
+                    <th data-sort="number">Draws</th>
+                    <th data-sort="number">Total vertices</th>
+                    <th>{html.escape(eid_label)}</th>
+                    <th data-sort="text">Meshes</th>
+                    <th data-sort="text">Top renderpasses</th>
+                    <th data-sort="text">Texture count</th>
+                  </tr>
+                </thead>
+    """
+
+
 def write_html_report(stem, out_dir, source_path, data, by_category):
     html_path = out_dir / f"{stem}_analysis.html"
     rows = data.get("draws", [])
@@ -361,8 +413,8 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
             for t, c in top_tex.most_common(12)
         )
         detail_rows = []
-        for r in group:
-            detail_rows.append(html_draw_detail_row(r))
+        for texture, texture_group in aggregate_by_index_texture(group):
+            detail_rows.append(html_texture_aggregate_row(texture, texture_group))
         detail_blocks.append(
             f"""
             <details id="{html.escape(category)}" class="category">
@@ -374,8 +426,8 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                 <span>{sum(1 for r in group if r.get('index_is_d_texture'))} _D indexed</span>
               </summary>
               <div class="toptex">{top_tex_html or '<span class="muted">No textures</span>'}</div>
-              <table>
-                {html_draw_detail_header()}
+              <table class="sortable">
+                {html_texture_aggregate_header()}
                 <tbody>{''.join(detail_rows)}</tbody>
               </table>
             </details>
@@ -459,7 +511,10 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                 f"<td><code>{html.escape(format_eids(group))}</code></td>"
                 "</tr>"
             )
-            enhanced_detail_rows = "".join(html_draw_detail_row(r) for r in group)
+            enhanced_detail_rows = "".join(
+                html_texture_aggregate_row(texture, texture_group, "EID")
+                for texture, texture_group in aggregate_by_index_texture(group)
+            )
             enhanced_detail_blocks.append(
                 f"""
             <details class="category">
@@ -468,8 +523,8 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                 <span>{len(group)} draw calls</span>
                 <span>{total_vertex_count(group):,} vertices</span>
               </summary>
-              <table>
-                {html_draw_detail_header("EID")}
+              <table class="sortable">
+                {html_texture_aggregate_header("EID")}
                 <tbody>{enhanced_detail_rows}</tbody>
               </table>
             </details>
@@ -546,9 +601,13 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
     th, td {{ border-right:1px solid var(--border); border-bottom:1px solid var(--border); padding:7px 8px; vertical-align:top; text-align:left; }}
     th:last-child, td:last-child {{ border-right:0; }}
     th {{ position:sticky; top:0; background:#eef2f7; z-index:1; }}
+    th[data-sort] {{ cursor:pointer; user-select:none; }}
+    th[data-sort]::after {{ content:" ⇅"; color:var(--muted); font-weight:400; }}
     .num {{ text-align:right; white-space:nowrap; }}
     code {{ font-family:Consolas, "Cascadia Mono", monospace; font-size:12px; }}
     a {{ color:var(--accent); text-decoration:none; }}
+    details.eids > summary {{ cursor:pointer; color:#0b4aa2; }}
+    details.eids div {{ margin-top:6px; max-width:820px; overflow-wrap:anywhere; }}
     details.category {{ background:var(--panel); border:1px solid var(--border); border-radius:8px; margin:10px 0; overflow:hidden; }}
     details.category > summary {{ cursor:pointer; display:flex; gap:14px; align-items:center; padding:10px 12px; background:#eef2f7; font-weight:600; }}
     summary .cat {{ min-width:210px; color:#0b4aa2; }}
@@ -601,6 +660,34 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
       <tbody>{''.join(summary_rows)}</tbody>
     </table>
   </main>
+  <script>
+    document.querySelectorAll('table.sortable th[data-sort]').forEach((th) => {{
+      th.addEventListener('click', () => {{
+        const table = th.closest('table');
+        const tbody = table.querySelector('tbody');
+        const index = Array.from(th.parentElement.children).indexOf(th);
+        const type = th.dataset.sort;
+        const current = th.dataset.dir === 'asc' ? 'desc' : 'asc';
+        th.parentElement.querySelectorAll('th[data-sort]').forEach((item) => delete item.dataset.dir);
+        th.dataset.dir = current;
+        const rows = Array.from(tbody.querySelectorAll('tr'));
+        rows.sort((a, b) => {{
+          const ac = a.children[index];
+          const bc = b.children[index];
+          const av = ac.dataset.value || ac.textContent.trim();
+          const bv = bc.dataset.value || bc.textContent.trim();
+          let result;
+          if (type === 'number') {{
+            result = Number(av.replace(/,/g, '')) - Number(bv.replace(/,/g, ''));
+          }} else {{
+            result = av.localeCompare(bv, undefined, {{ numeric: true, sensitivity: 'base' }});
+          }}
+          return current === 'asc' ? result : -result;
+        }});
+        rows.forEach((row) => tbody.appendChild(row));
+      }});
+    }});
+  </script>
 </body>
 </html>"""
     html_path.write_text(doc, encoding="utf-8")
