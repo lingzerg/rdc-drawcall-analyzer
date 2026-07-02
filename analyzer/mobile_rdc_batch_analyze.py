@@ -2,6 +2,7 @@ import argparse
 import csv
 import html
 import json
+import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -34,6 +35,54 @@ def total_vertex_count(rows):
     return sum(draw_vertex_count(r) for r in rows)
 
 
+def normalize_draw_command(name):
+    match = re.search(r"(DrawIndexedInstanced|DrawIndexed|DrawInstanced|DrawAuto|Draw)\b", str(name or ""))
+    return match.group(1) if match else str(name or "")
+
+
+def merge_signature(row):
+    return (
+        str(row.get("renderpass") or "").replace("\\", "/"),
+        normalize_draw_command(row.get("command")),
+        int(row.get("index_count") or row.get("vertex_count") or 0),
+        int(row.get("instance_count") or 1),
+    )
+
+
+def merge_enhanced_rows(xml_data, enhanced_rows):
+    if not enhanced_rows:
+        return 0
+    buckets = defaultdict(list)
+    for row in xml_data.get("draws", []):
+        buckets[merge_signature(row)].append(row)
+
+    used = Counter()
+    merged = 0
+    for enhanced in enhanced_rows:
+        sig = merge_signature(enhanced)
+        used[sig] += 1
+        candidates = buckets.get(sig) or []
+        if used[sig] > len(candidates):
+            continue
+        target = candidates[used[sig] - 1]
+        target["xml_chunk_index"] = target.get("chunk_index")
+        target["event_id"] = enhanced.get("chunk_index")
+        target["enhanced_match"] = True
+        for key in (
+            "index_texture",
+            "index_is_d_texture",
+            "category_by_d_texture",
+            "d_textures",
+            "textures",
+            "texture_count",
+            "mesh_name",
+            "pass",
+        ):
+            target[key] = enhanced.get(key)
+        merged += 1
+    return merged
+
+
 def renderpass_label(row):
     value = row.get("renderpass")
     if value in (None, ""):
@@ -42,6 +91,8 @@ def renderpass_label(row):
 
 
 def eid_value(row):
+    if row.get("event_id") not in (None, ""):
+        return str(row.get("event_id"))
     value = row.get("chunk_index")
     if value in (None, ""):
         return "-"
@@ -88,6 +139,11 @@ def build_index_texture_groups(rows):
 
 def aggregate_by_index_texture(rows):
     return build_index_texture_groups(rows)
+
+
+def category_sort_key(item):
+    category, group = item
+    return (category == "unclassified", -len(group), category)
 
 
 def find_renderdoccmd(explicit=None):
@@ -211,7 +267,7 @@ def write_csvs(data, stem, out_dir):
     category_rows = []
     by_category = build_category_groups(data)
 
-    for category, group in sorted(by_category.items(), key=lambda kv: len(kv[1]), reverse=True):
+    for category, group in sorted(by_category.items(), key=category_sort_key):
         index_counter = Counter(r.get("index_texture") or "-" for r in group)
         rp_counter = Counter(r.get("renderpass") for r in group)
         category_rows.append(
@@ -381,10 +437,11 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
     enhanced_rows = data.get("enhanced_draws", [])
     dispatches = data.get("dispatches", [])
     command_counts = Counter(data.get("command_counts", {}))
-    ordered = sorted(by_category.items(), key=lambda kv: len(kv[1]), reverse=True)
+    ordered = sorted(by_category.items(), key=category_sort_key)
     textured = sum(1 for r in rows if r.get("texture_count"))
     d_indexed = sum(1 for r in rows if r.get("index_is_d_texture"))
     category_total = sum(len(group) for _, group in ordered)
+    enhanced_merged = data.get("enhanced_merged_draws") or sum(1 for r in rows if r.get("enhanced_match"))
 
     summary_rows = []
     for category, group in ordered:
@@ -407,7 +464,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
         for row in source_rows:
             grouped[texture_category(row)].append(row)
         blocks = []
-        for category, group in sorted(grouped.items(), key=lambda kv: len(kv[1]), reverse=True):
+        for category, group in sorted(grouped.items(), key=category_sort_key):
             top_tex = Counter()
             for r in group:
                 for tex in r.get("textures") or []:
@@ -439,18 +496,9 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
             )
         return blocks
 
-    category_detail_rows = enhanced_rows or rows
-    category_detail_label = "EID" if enhanced_rows else "EID/chunkIndex"
+    category_detail_rows = rows
+    category_detail_label = "EID/chunkIndex"
     detail_blocks = make_category_detail_blocks(category_detail_rows, category_detail_label)
-    raw_detail_section = ""
-    if enhanced_rows:
-        raw_detail_blocks = make_category_detail_blocks(rows, id_prefix="raw-")
-        raw_detail_section = f"""
-    <details class="section">
-      <summary>Full XML Raw Category Details</summary>
-      {''.join(raw_detail_blocks)}
-    </details>
-"""
 
     pass_blocks = []
     for pass_name, pass_group in build_renderpass_groups(rows):
@@ -458,7 +506,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
         for r in pass_group:
             pass_by_category[texture_category(r)].append(r)
         pass_category_rows = []
-        for category, group in sorted(pass_by_category.items(), key=lambda kv: len(kv[1]), reverse=True):
+        for category, group in sorted(pass_by_category.items(), key=category_sort_key):
             top_idx = Counter(r.get("index_texture") or "-" for r in group).most_common(5)
             pass_category_rows.append(
                 "<tr>"
@@ -515,7 +563,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
         enhanced_by_category = defaultdict(list)
         for r in enhanced_rows:
             enhanced_by_category[texture_category(r)].append(r)
-        for category, group in sorted(enhanced_by_category.items(), key=lambda kv: len(kv[1]), reverse=True):
+        for category, group in sorted(enhanced_by_category.items(), key=category_sort_key):
             top_idx = Counter(r.get("index_texture") or "-" for r in group).most_common(8)
             renderpasses = Counter(renderpass_label(r) for r in group).most_common(5)
             enhanced_category_rows.append(
@@ -630,11 +678,11 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
       <div class="card">_D indexed draws<b>{d_indexed}</b></div>
       <div class="card">Categorized draws<b>{category_total}</b></div>
       <div class="card">Enhanced texture rows<b>{len(enhanced_rows)}</b></div>
+      <div class="card">Merged enhanced draws<b>{enhanced_merged}</b></div>
     </div>
 
     <h2 class="section-title">Category Details</h2>
     {''.join(detail_blocks)}
-    {raw_detail_section}
 
     <h2 class="section-title">RenderPass/Marker Major Groups</h2>
     {''.join(pass_blocks)}
@@ -708,7 +756,7 @@ def write_category_detail_md(stem, out_dir, by_category):
         "| Category(second field) | DrawCalls | Total vertices | Textured | `_D` indexed | Top index textures |",
         "|---|---:|---:|---:|---:|---|",
     ]
-    ordered = sorted(by_category.items(), key=lambda kv: len(kv[1]), reverse=True)
+    ordered = sorted(by_category.items(), key=category_sort_key)
     for category, group in ordered:
         top_idx = Counter(r.get("index_texture") or "-" for r in group).most_common(5)
         lines.append(
@@ -798,6 +846,9 @@ def main():
         data = json.loads(probe_json.read_text(encoding="utf-8"))
         print(f"      Load enhanced pipeline rows: {rows_path}", flush=True)
         data["enhanced_draws"] = data_from_precomputed_rows(rows_path)["draws"]
+        merged = merge_enhanced_rows(data, data["enhanced_draws"])
+        data["enhanced_merged_draws"] = merged
+        print(f"      Merged enhanced rows into full XML draws: {merged}/{len(data['enhanced_draws'])}", flush=True)
         data["enhanced_source"] = str(rows_path)
     else:
         print("[2/4] Parse draw calls and texture bindings", flush=True)

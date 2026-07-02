@@ -234,8 +234,16 @@ def main():
                     "chunk_index": chunk_index,
                     "command": name,
                     "renderpass": "/".join(marker_stack),
-                    "index_count": uint_value(chunk, "IndexCount") or uint_value(chunk, "indexCount"),
-                    "vertex_count": uint_value(chunk, "VertexCount") or uint_value(chunk, "vertexCount"),
+                    "index_count": (
+                        uint_value(chunk, "IndexCount")
+                        or uint_value(chunk, "indexCount")
+                        or uint_value(chunk, "IndexCountPerInstance")
+                    ),
+                    "vertex_count": (
+                        uint_value(chunk, "VertexCount")
+                        or uint_value(chunk, "vertexCount")
+                        or uint_value(chunk, "VertexCountPerInstance")
+                    ),
                     "instance_count": uint_value(chunk, "InstanceCount", 1) or uint_value(chunk, "instanceCount", 1),
                     "descriptor_sets": bound_views,
                     "texture_count": len(tex_unique),
