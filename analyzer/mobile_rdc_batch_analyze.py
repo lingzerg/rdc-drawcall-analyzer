@@ -34,6 +34,43 @@ def total_vertex_count(rows):
     return sum(draw_vertex_count(r) for r in rows)
 
 
+def renderpass_label(row):
+    value = row.get("renderpass")
+    if value in (None, ""):
+        return "no_marker"
+    return str(value)
+
+
+def eid_value(row):
+    value = row.get("chunk_index")
+    if value in (None, ""):
+        return "-"
+    return str(value)
+
+
+def format_eids(rows, limit=80):
+    eids = [eid_value(r) for r in sorted(rows, key=lambda r: r.get("draw_index") or 0)]
+    shown = eids[:limit]
+    suffix = "" if len(eids) <= limit else f"; ... +{len(eids) - limit}"
+    return "; ".join(shown) + suffix
+
+
+def build_renderpass_groups(rows):
+    groups = defaultdict(list)
+    for row in rows:
+        groups[renderpass_label(row)].append(row)
+    return sorted(groups.items(), key=lambda kv: len(kv[1]), reverse=True)
+
+
+def build_index_texture_groups(rows):
+    groups = defaultdict(list)
+    for row in rows:
+        tex = row.get("index_texture")
+        if tex:
+            groups[tex].append(row)
+    return sorted(groups.items(), key=lambda kv: len(kv[1]), reverse=True)
+
+
 def find_renderdoccmd(explicit=None):
     candidates = []
     if explicit:
@@ -256,11 +293,13 @@ def html_texture_list(textures, limit=18):
 def write_html_report(stem, out_dir, source_path, data, by_category):
     html_path = out_dir / f"{stem}_analysis.html"
     rows = data.get("draws", [])
+    enhanced_rows = data.get("enhanced_draws", [])
     dispatches = data.get("dispatches", [])
     command_counts = Counter(data.get("command_counts", {}))
     ordered = sorted(by_category.items(), key=lambda kv: len(kv[1]), reverse=True)
     textured = sum(1 for r in rows if r.get("texture_count"))
     d_indexed = sum(1 for r in rows if r.get("index_is_d_texture"))
+    category_total = sum(len(group) for _, group in ordered)
 
     summary_rows = []
     for category, group in ordered:
@@ -300,7 +339,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                 f"<td class='num'>{r.get('draw_index')}</td>"
                 f"<td>{html_texture_list(r.get('textures') or [])}</td>"
                 f"<td class='num'>{r.get('texture_count')}</td>"
-                f"<td class='num'>{r.get('chunk_index')}</td>"
+                f"<td class='num'>{html.escape(eid_value(r))}</td>"
                 f"<td>{html.escape(str(r.get('renderpass') or ''))}</td>"
                 f"<td><code>{html.escape(str(r.get('command') or ''))}</code></td>"
                 f"<td class='num'>{idx_or_vert}</td>"
@@ -322,7 +361,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                 <thead>
                   <tr>
                     <th>Index texture</th><th>Mesh</th><th>Vertices</th><th>Draw #</th>
-                    <th>Textures</th><th>Texture count</th><th>chunkIndex</th>
+                    <th>Textures</th><th>Texture count</th><th>EID/chunkIndex</th>
                     <th>RenderPass/Marker</th><th>Cmd</th><th>idx/verts</th><th>inst</th>
                   </tr>
                 </thead>
@@ -331,6 +370,126 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
             </details>
             """
         )
+
+    pass_blocks = []
+    for pass_name, pass_group in build_renderpass_groups(rows):
+        pass_by_category = defaultdict(list)
+        for r in pass_group:
+            pass_by_category[texture_category(r)].append(r)
+        pass_category_rows = []
+        for category, group in sorted(pass_by_category.items(), key=lambda kv: len(kv[1]), reverse=True):
+            top_idx = Counter(r.get("index_texture") or "-" for r in group).most_common(5)
+            pass_category_rows.append(
+                "<tr>"
+                f"<td>{html.escape(category)}</td>"
+                f"<td class='num'>{len(group)}</td>"
+                f"<td class='num'>{total_vertex_count(group):,}</td>"
+                f"<td class='num'>{sum(1 for r in group if r.get('texture_count'))}</td>"
+                f"<td class='num'>{sum(1 for r in group if r.get('index_is_d_texture'))}</td>"
+                f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in top_idx))}</td>"
+                f"<td><code>{html.escape(format_eids(group))}</code></td>"
+                "</tr>"
+            )
+        pass_blocks.append(
+            f"""
+            <details class="category">
+              <summary>
+                <span class="cat">{html.escape(pass_name)}</span>
+                <span>{len(pass_group)} draw calls</span>
+                <span>{total_vertex_count(pass_group):,} vertices</span>
+                <span>{sum(1 for r in pass_group if r.get('texture_count'))} textured</span>
+              </summary>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Texture category</th><th>Draws</th><th>Total vertices</th>
+                    <th>Textured</th><th>_D indexed</th><th>Top index textures</th><th>EID/chunkIndex</th>
+                  </tr>
+                </thead>
+                <tbody>{''.join(pass_category_rows)}</tbody>
+              </table>
+            </details>
+            """
+        )
+
+    texture_rows = []
+    for tex, group in build_index_texture_groups(rows):
+        categories = Counter(texture_category(r) for r in group).most_common(5)
+        renderpasses = Counter(renderpass_label(r) for r in group).most_common(5)
+        meshes = Counter(r.get("mesh_name") or "-" for r in group).most_common(6)
+        texture_rows.append(
+            "<tr>"
+            f"<td><code>{html.escape(str(tex))}</code></td>"
+            f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in categories))}</td>"
+            f"<td class='num'>{len(group)}</td>"
+            f"<td class='num'>{total_vertex_count(group):,}</td>"
+            f"<td><code>{html.escape(format_eids(group))}</code></td>"
+            f"<td>{html.escape('; '.join(f'{k}:{v}' for k, v in renderpasses))}</td>"
+            f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in meshes))}</td>"
+            "</tr>"
+        )
+
+    enhanced_category_rows = []
+    if enhanced_rows:
+        enhanced_by_category = defaultdict(list)
+        for r in enhanced_rows:
+            enhanced_by_category[texture_category(r)].append(r)
+        for category, group in sorted(enhanced_by_category.items(), key=lambda kv: len(kv[1]), reverse=True):
+            top_idx = Counter(r.get("index_texture") or "-" for r in group).most_common(8)
+            renderpasses = Counter(renderpass_label(r) for r in group).most_common(5)
+            enhanced_category_rows.append(
+                "<tr>"
+                f"<td>{html.escape(category)}</td>"
+                f"<td class='num'>{len(group)}</td>"
+                f"<td class='num'>{total_vertex_count(group):,}</td>"
+                f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in top_idx))}</td>"
+                f"<td>{html.escape('; '.join(f'{k}:{v}' for k, v in renderpasses))}</td>"
+                f"<td><code>{html.escape(format_eids(group))}</code></td>"
+                "</tr>"
+            )
+
+    enhanced_texture_rows = []
+    for tex, group in build_index_texture_groups(enhanced_rows):
+        categories = Counter(texture_category(r) for r in group).most_common(5)
+        renderpasses = Counter(renderpass_label(r) for r in group).most_common(5)
+        meshes = Counter(r.get("mesh_name") or "-" for r in group).most_common(6)
+        enhanced_texture_rows.append(
+            "<tr>"
+            f"<td><code>{html.escape(str(tex))}</code></td>"
+            f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in categories))}</td>"
+            f"<td class='num'>{len(group)}</td>"
+            f"<td class='num'>{total_vertex_count(group):,}</td>"
+            f"<td><code>{html.escape(format_eids(group))}</code></td>"
+            f"<td>{html.escape('; '.join(f'{k}:{v}' for k, v in renderpasses))}</td>"
+            f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in meshes))}</td>"
+            "</tr>"
+        )
+
+    enhanced_section = ""
+    if enhanced_rows:
+        enhanced_section = f"""
+    <h2 class="section-title">Enhanced Pipeline Texture Rows</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Texture category</th><th>Draws</th><th>Total vertices</th>
+          <th>Top index textures</th><th>Top renderpasses</th><th>EID</th>
+        </tr>
+      </thead>
+      <tbody>{''.join(enhanced_category_rows)}</tbody>
+    </table>
+
+    <h2 class="section-title">Enhanced Index Texture Usage</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Index texture</th><th>Categories</th><th>Draws</th><th>Total vertices</th>
+          <th>EID</th><th>Top renderpasses</th><th>Top meshes</th>
+        </tr>
+      </thead>
+      <tbody>{''.join(enhanced_texture_rows)}</tbody>
+    </table>
+"""
 
     cmd_rows = "".join(
         f"<tr><td><code>{html.escape(str(cmd))}</code></td><td class='num'>{cnt}</td></tr>"
@@ -378,10 +537,28 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
       <div class="card">Dispatches<b>{len(dispatches)}</b></div>
       <div class="card">Textured draws<b>{textured}</b></div>
       <div class="card">_D indexed draws<b>{d_indexed}</b></div>
+      <div class="card">Categorized draws<b>{category_total}</b></div>
+      <div class="card">Enhanced texture rows<b>{len(enhanced_rows)}</b></div>
     </div>
 
     <h2 class="section-title">Category Details</h2>
     {''.join(detail_blocks)}
+
+    <h2 class="section-title">RenderPass/Marker Major Groups</h2>
+    {''.join(pass_blocks)}
+
+    <h2 class="section-title">Index Texture Usage</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Index texture</th><th>Categories</th><th>Draws</th><th>Total vertices</th>
+          <th>EID/chunkIndex</th><th>Top renderpasses</th><th>Top meshes</th>
+        </tr>
+      </thead>
+      <tbody>{''.join(texture_rows)}</tbody>
+    </table>
+
+    {enhanced_section}
 
     <h2 class="section-title">Command Top</h2>
     <table><thead><tr><th>Command</th><th>Count</th></tr></thead><tbody>{cmd_rows}</tbody></table>
@@ -492,9 +669,12 @@ def main():
     driver = detect_driver(xml_path)
     rows_path = find_precomputed_rows(source_path, out_dir)
     if driver == "D3D11" and rows_path is not None:
-        print(f"[2/4] Use precomputed pipeline rows: {rows_path}", flush=True)
-        data = data_from_precomputed_rows(rows_path)
-        probe_json = probe_md = None
+        print("[2/4] Parse full D3D11 draw calls from XML", flush=True)
+        probe_json, probe_md = run_probe(xml_path)
+        data = json.loads(probe_json.read_text(encoding="utf-8"))
+        print(f"      Load enhanced pipeline rows: {rows_path}", flush=True)
+        data["enhanced_draws"] = data_from_precomputed_rows(rows_path)["draws"]
+        data["enhanced_source"] = str(rows_path)
     else:
         print("[2/4] Parse draw calls and texture bindings", flush=True)
         probe_json, probe_md = run_probe(xml_path)
