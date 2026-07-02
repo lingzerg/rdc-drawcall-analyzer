@@ -21,6 +21,19 @@ def clean_input_path(raw):
     return Path(text)
 
 
+def draw_vertex_count(row):
+    base = row.get("index_count") or row.get("vertex_count") or 0
+    inst = row.get("instance_count") or 1
+    try:
+        return int(base) * int(inst)
+    except (TypeError, ValueError):
+        return 0
+
+
+def total_vertex_count(rows):
+    return sum(draw_vertex_count(r) for r in rows)
+
+
 def find_renderdoccmd(explicit=None):
     candidates = []
     if explicit:
@@ -149,6 +162,7 @@ def write_csvs(data, stem, out_dir):
             {
                 "category_second_field": category,
                 "draw_calls": len(group),
+                "total_vertices": total_vertex_count(group),
                 "d_indexed_draws": sum(1 for r in group if r.get("index_is_d_texture")),
                 "textured_draws": sum(1 for r in group if r.get("texture_count")),
                 "renderpasses": "; ".join(f"{k}:{v}" for k, v in rp_counter.most_common()),
@@ -165,6 +179,7 @@ def write_csvs(data, stem, out_dir):
             fieldnames=[
                 "category_second_field",
                 "draw_calls",
+                "total_vertices",
                 "d_indexed_draws",
                 "textured_draws",
                 "renderpasses",
@@ -183,6 +198,7 @@ def write_csvs(data, stem, out_dir):
                 "chunk_index",
                 "renderpass",
                 "command",
+                "vertices",
                 "index_count",
                 "vertex_count",
                 "instance_count",
@@ -203,6 +219,7 @@ def write_csvs(data, stem, out_dir):
                     "chunk_index": r.get("chunk_index"),
                     "renderpass": r.get("renderpass"),
                     "command": r.get("command"),
+                    "vertices": draw_vertex_count(r),
                     "index_count": r.get("index_count"),
                     "vertex_count": r.get("vertex_count"),
                     "instance_count": r.get("instance_count"),
@@ -253,6 +270,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
             "<tr>"
             f"<td><a href='#{html.escape(category)}'>{html.escape(category)}</a></td>"
             f"<td class='num'>{len(group)}</td>"
+            f"<td class='num'>{total_vertex_count(group):,}</td>"
             f"<td class='num'>{sum(1 for r in group if r.get('texture_count'))}</td>"
             f"<td class='num'>{sum(1 for r in group if r.get('index_is_d_texture'))}</td>"
             f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in top_idx))}</td>"
@@ -272,11 +290,13 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
         )
         detail_rows = []
         for r in group:
+            vertices = draw_vertex_count(r)
             idx_or_vert = r.get("index_count") or r.get("vertex_count") or 0
             detail_rows.append(
                 "<tr>"
                 f"<td><code>{html.escape(str(r.get('index_texture') or '-'))}</code></td>"
                 f"<td><code>{html.escape(str(r.get('mesh_name') or ''))}</code></td>"
+                f"<td class='num'>{vertices:,}</td>"
                 f"<td class='num'>{r.get('draw_index')}</td>"
                 f"<td>{html_texture_list(r.get('textures') or [])}</td>"
                 f"<td class='num'>{r.get('texture_count')}</td>"
@@ -293,6 +313,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
               <summary>
                 <span class="cat">{html.escape(category)}</span>
                 <span>{len(group)} draw calls</span>
+                <span>{total_vertex_count(group):,} vertices</span>
                 <span>{sum(1 for r in group if r.get('texture_count'))} textured</span>
                 <span>{sum(1 for r in group if r.get('index_is_d_texture'))} _D indexed</span>
               </summary>
@@ -300,7 +321,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
               <table>
                 <thead>
                   <tr>
-                    <th>Index texture</th><th>Mesh</th><th>Draw #</th>
+                    <th>Index texture</th><th>Mesh</th><th>Vertices</th><th>Draw #</th>
                     <th>Textures</th><th>Texture count</th><th>chunkIndex</th>
                     <th>RenderPass/Marker</th><th>Cmd</th><th>idx/verts</th><th>inst</th>
                   </tr>
@@ -367,7 +388,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
 
     <h2 class="section-title">Texture Category Summary</h2>
     <table>
-      <thead><tr><th>Category(second field)</th><th>Draws</th><th>Textured</th><th>_D indexed</th><th>Top index textures</th><th>Top renderpasses</th></tr></thead>
+      <thead><tr><th>Category(second field)</th><th>Draws</th><th>Total vertices</th><th>Textured</th><th>_D indexed</th><th>Top index textures</th><th>Top renderpasses</th></tr></thead>
       <tbody>{''.join(summary_rows)}</tbody>
     </table>
   </main>
@@ -383,14 +404,14 @@ def write_category_detail_md(stem, out_dir, by_category):
         f"# {stem} texture category details",
         "",
         "## Category Summary",
-        "| Category(second field) | DrawCalls | Textured | `_D` indexed | Top index textures |",
-        "|---|---:|---:|---:|---|",
+        "| Category(second field) | DrawCalls | Total vertices | Textured | `_D` indexed | Top index textures |",
+        "|---|---:|---:|---:|---:|---|",
     ]
     ordered = sorted(by_category.items(), key=lambda kv: len(kv[1]), reverse=True)
     for category, group in ordered:
         top_idx = Counter(r.get("index_texture") or "-" for r in group).most_common(5)
         lines.append(
-            f"| `{category}` | {len(group)} | {sum(1 for r in group if r.get('texture_count'))} | "
+            f"| `{category}` | {len(group)} | {total_vertex_count(group)} | {sum(1 for r in group if r.get('texture_count'))} | "
             f"{sum(1 for r in group if r.get('index_is_d_texture'))} | "
             f"{'; '.join(f'`{k}` ({v})' for k, v in top_idx)} |"
         )
@@ -401,16 +422,17 @@ def write_category_detail_md(stem, out_dir, by_category):
             f"## {category}",
             "",
             f"- DrawCall: {len(group)}",
+            f"- Total vertices: {total_vertex_count(group)}",
             f"- Textured: {sum(1 for r in group if r.get('texture_count'))}",
             f"- `_D` indexed: {sum(1 for r in group if r.get('index_is_d_texture'))}",
             "",
-            "| Index texture | Mesh | Draw # | Textures | Texture count | chunkIndex | RenderPass | Cmd | idx/verts | inst |",
-            "|---|---|---:|---|---:|---:|---|---|---:|---:|",
+            "| Index texture | Mesh | Vertices | Draw # | Textures | Texture count | chunkIndex | RenderPass | Cmd | idx/verts | inst |",
+            "|---|---|---:|---:|---|---:|---:|---|---|---:|---:|",
         ]
         for r in group:
             idx_or_vert = r.get("index_count") or r.get("vertex_count") or 0
             lines.append(
-                f"| `{r.get('index_texture')}` | `{r.get('mesh_name')}` | {r.get('draw_index')} | "
+                f"| `{r.get('index_texture')}` | `{r.get('mesh_name')}` | {draw_vertex_count(r)} | {r.get('draw_index')} | "
                 f"{md_texture_list(r.get('textures') or [])} | {r.get('texture_count')} | "
                 f"{r.get('chunk_index')} | {r.get('renderpass')} | `{r.get('command')}` | "
                 f"{idx_or_vert} | {r.get('instance_count')} |"
