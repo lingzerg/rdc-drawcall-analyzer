@@ -402,37 +402,55 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
             "</tr>"
         )
 
-    detail_blocks = []
-    for category, group in ordered:
-        top_tex = Counter()
-        for r in group:
-            for tex in r.get("textures") or []:
-                top_tex[tex] += 1
-        top_tex_html = " ".join(
-            f"<span class='pill'>{html.escape(str(t))} <b>{c}</b></span>"
-            for t, c in top_tex.most_common(12)
-        )
-        detail_rows = []
-        for texture, texture_group in aggregate_by_index_texture(group):
-            detail_rows.append(html_texture_aggregate_row(texture, texture_group))
-        detail_blocks.append(
-            f"""
-            <details id="{html.escape(category)}" class="category">
-              <summary>
-                <span class="cat">{html.escape(category)}</span>
-                <span>{len(group)} draw calls</span>
-                <span>{total_vertex_count(group):,} vertices</span>
-                <span>{sum(1 for r in group if r.get('texture_count'))} textured</span>
-                <span>{sum(1 for r in group if r.get('index_is_d_texture'))} _D indexed</span>
-              </summary>
-              <div class="toptex">{top_tex_html or '<span class="muted">No textures</span>'}</div>
-              <table class="sortable">
-                {html_texture_aggregate_header()}
-                <tbody>{''.join(detail_rows)}</tbody>
-              </table>
-            </details>
-            """
-        )
+    def make_category_detail_blocks(source_rows, eid_label="EID/chunkIndex", id_prefix=""):
+        grouped = defaultdict(list)
+        for row in source_rows:
+            grouped[texture_category(row)].append(row)
+        blocks = []
+        for category, group in sorted(grouped.items(), key=lambda kv: len(kv[1]), reverse=True):
+            top_tex = Counter()
+            for r in group:
+                for tex in r.get("textures") or []:
+                    top_tex[tex] += 1
+            top_tex_html = " ".join(
+                f"<span class='pill'>{html.escape(str(t))} <b>{c}</b></span>"
+                for t, c in top_tex.most_common(12)
+            )
+            detail_rows = []
+            for texture, texture_group in aggregate_by_index_texture(group):
+                detail_rows.append(html_texture_aggregate_row(texture, texture_group, eid_label))
+            blocks.append(
+                f"""
+                <details id="{html.escape(id_prefix + category)}" class="category">
+                  <summary>
+                    <span class="cat">{html.escape(category)}</span>
+                    <span>{len(group)} draw calls</span>
+                    <span>{total_vertex_count(group):,} vertices</span>
+                    <span>{sum(1 for r in group if r.get('texture_count'))} textured</span>
+                    <span>{sum(1 for r in group if r.get('index_is_d_texture'))} _D indexed</span>
+                  </summary>
+                  <div class="toptex">{top_tex_html or '<span class="muted">No textures</span>'}</div>
+                  <table class="sortable">
+                    {html_texture_aggregate_header(eid_label)}
+                    <tbody>{''.join(detail_rows)}</tbody>
+                  </table>
+                </details>
+                """
+            )
+        return blocks
+
+    category_detail_rows = enhanced_rows or rows
+    category_detail_label = "EID" if enhanced_rows else "EID/chunkIndex"
+    detail_blocks = make_category_detail_blocks(category_detail_rows, category_detail_label)
+    raw_detail_section = ""
+    if enhanced_rows:
+        raw_detail_blocks = make_category_detail_blocks(rows, id_prefix="raw-")
+        raw_detail_section = f"""
+    <details class="section">
+      <summary>Full XML Raw Category Details</summary>
+      {''.join(raw_detail_blocks)}
+    </details>
+"""
 
     pass_blocks = []
     for pass_name, pass_group in build_renderpass_groups(rows):
@@ -493,7 +511,6 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
         )
 
     enhanced_category_rows = []
-    enhanced_detail_blocks = []
     if enhanced_rows:
         enhanced_by_category = defaultdict(list)
         for r in enhanced_rows:
@@ -510,25 +527,6 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                 f"<td>{html.escape('; '.join(f'{k}:{v}' for k, v in renderpasses))}</td>"
                 f"<td><code>{html.escape(format_eids(group))}</code></td>"
                 "</tr>"
-            )
-            enhanced_detail_rows = "".join(
-                html_texture_aggregate_row(texture, texture_group, "EID")
-                for texture, texture_group in aggregate_by_index_texture(group)
-            )
-            enhanced_detail_blocks.append(
-                f"""
-            <details class="category">
-              <summary>
-                <span class="cat">{html.escape(category)}</span>
-                <span>{len(group)} draw calls</span>
-                <span>{total_vertex_count(group):,} vertices</span>
-              </summary>
-              <table class="sortable">
-                {html_texture_aggregate_header("EID")}
-                <tbody>{enhanced_detail_rows}</tbody>
-              </table>
-            </details>
-                """
             )
 
     enhanced_texture_rows = []
@@ -561,9 +559,6 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
       </thead>
       <tbody>{''.join(enhanced_category_rows)}</tbody>
     </table>
-
-    <h2 class="section-title">Enhanced Category Details</h2>
-    {''.join(enhanced_detail_blocks)}
 
     <details class="section">
       <summary>Enhanced Index Texture Usage</summary>
@@ -639,6 +634,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
 
     <h2 class="section-title">Category Details</h2>
     {''.join(detail_blocks)}
+    {raw_detail_section}
 
     <h2 class="section-title">RenderPass/Marker Major Groups</h2>
     {''.join(pass_blocks)}
