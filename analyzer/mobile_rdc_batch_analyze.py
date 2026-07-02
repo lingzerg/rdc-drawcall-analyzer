@@ -290,6 +290,39 @@ def html_texture_list(textures, limit=18):
     return "<br>".join(escaped)
 
 
+def html_draw_detail_row(row):
+    vertices = draw_vertex_count(row)
+    idx_or_vert = row.get("index_count") or row.get("vertex_count") or 0
+    mesh_name = row.get("mesh_name") or "-"
+    return (
+        "<tr>"
+        f"<td><code>{html.escape(str(row.get('index_texture') or '-'))}</code></td>"
+        f"<td><code>{html.escape(str(mesh_name))}</code></td>"
+        f"<td class='num'>{vertices:,}</td>"
+        f"<td class='num'>{row.get('draw_index')}</td>"
+        f"<td>{html_texture_list(row.get('textures') or [])}</td>"
+        f"<td class='num'>{row.get('texture_count')}</td>"
+        f"<td class='num'>{html.escape(eid_value(row))}</td>"
+        f"<td>{html.escape(str(row.get('renderpass') or ''))}</td>"
+        f"<td><code>{html.escape(str(row.get('command') or ''))}</code></td>"
+        f"<td class='num'>{idx_or_vert}</td>"
+        f"<td class='num'>{row.get('instance_count')}</td>"
+        "</tr>"
+    )
+
+
+def html_draw_detail_header(eid_label="EID/chunkIndex"):
+    return f"""
+                <thead>
+                  <tr>
+                    <th>Index texture</th><th>Mesh</th><th>Vertices</th><th>Draw #</th>
+                    <th>Textures</th><th>Texture count</th><th>{html.escape(eid_label)}</th>
+                    <th>RenderPass/Marker</th><th>Cmd</th><th>idx/verts</th><th>inst</th>
+                  </tr>
+                </thead>
+    """
+
+
 def write_html_report(stem, out_dir, source_path, data, by_category):
     html_path = out_dir / f"{stem}_analysis.html"
     rows = data.get("draws", [])
@@ -329,23 +362,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
         )
         detail_rows = []
         for r in group:
-            vertices = draw_vertex_count(r)
-            idx_or_vert = r.get("index_count") or r.get("vertex_count") or 0
-            detail_rows.append(
-                "<tr>"
-                f"<td><code>{html.escape(str(r.get('index_texture') or '-'))}</code></td>"
-                f"<td><code>{html.escape(str(r.get('mesh_name') or ''))}</code></td>"
-                f"<td class='num'>{vertices:,}</td>"
-                f"<td class='num'>{r.get('draw_index')}</td>"
-                f"<td>{html_texture_list(r.get('textures') or [])}</td>"
-                f"<td class='num'>{r.get('texture_count')}</td>"
-                f"<td class='num'>{html.escape(eid_value(r))}</td>"
-                f"<td>{html.escape(str(r.get('renderpass') or ''))}</td>"
-                f"<td><code>{html.escape(str(r.get('command') or ''))}</code></td>"
-                f"<td class='num'>{idx_or_vert}</td>"
-                f"<td class='num'>{r.get('instance_count')}</td>"
-                "</tr>"
-            )
+            detail_rows.append(html_draw_detail_row(r))
         detail_blocks.append(
             f"""
             <details id="{html.escape(category)}" class="category">
@@ -358,13 +375,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
               </summary>
               <div class="toptex">{top_tex_html or '<span class="muted">No textures</span>'}</div>
               <table>
-                <thead>
-                  <tr>
-                    <th>Index texture</th><th>Mesh</th><th>Vertices</th><th>Draw #</th>
-                    <th>Textures</th><th>Texture count</th><th>EID/chunkIndex</th>
-                    <th>RenderPass/Marker</th><th>Cmd</th><th>idx/verts</th><th>inst</th>
-                  </tr>
-                </thead>
+                {html_draw_detail_header()}
                 <tbody>{''.join(detail_rows)}</tbody>
               </table>
             </details>
@@ -430,6 +441,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
         )
 
     enhanced_category_rows = []
+    enhanced_detail_blocks = []
     if enhanced_rows:
         enhanced_by_category = defaultdict(list)
         for r in enhanced_rows:
@@ -446,6 +458,22 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                 f"<td>{html.escape('; '.join(f'{k}:{v}' for k, v in renderpasses))}</td>"
                 f"<td><code>{html.escape(format_eids(group))}</code></td>"
                 "</tr>"
+            )
+            enhanced_detail_rows = "".join(html_draw_detail_row(r) for r in group)
+            enhanced_detail_blocks.append(
+                f"""
+            <details class="category">
+              <summary>
+                <span class="cat">{html.escape(category)}</span>
+                <span>{len(group)} draw calls</span>
+                <span>{total_vertex_count(group):,} vertices</span>
+              </summary>
+              <table>
+                {html_draw_detail_header("EID")}
+                <tbody>{enhanced_detail_rows}</tbody>
+              </table>
+            </details>
+                """
             )
 
     enhanced_texture_rows = []
@@ -478,6 +506,9 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
       </thead>
       <tbody>{''.join(enhanced_category_rows)}</tbody>
     </table>
+
+    <h2 class="section-title">Enhanced Category Details</h2>
+    {''.join(enhanced_detail_blocks)}
 
     <h2 class="section-title">Enhanced Index Texture Usage</h2>
     <table>
@@ -512,7 +543,8 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
     .card {{ background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:12px; }}
     .card b {{ display:block; font-size:22px; margin-top:4px; }}
     table {{ width:100%; border-collapse:collapse; background:var(--panel); border:1px solid var(--border); margin:10px 0 18px; }}
-    th, td {{ border-bottom:1px solid var(--border); padding:7px 8px; vertical-align:top; text-align:left; }}
+    th, td {{ border-right:1px solid var(--border); border-bottom:1px solid var(--border); padding:7px 8px; vertical-align:top; text-align:left; }}
+    th:last-child, td:last-child {{ border-right:0; }}
     th {{ position:sticky; top:0; background:#eef2f7; z-index:1; }}
     .num {{ text-align:right; white-space:nowrap; }}
     code {{ font-family:Consolas, "Cascadia Mono", monospace; font-size:12px; }}
