@@ -658,9 +658,6 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
 
     {enhanced_section}
 
-    <h2 class="section-title">Command Top</h2>
-    <table><thead><tr><th>Command</th><th>Count</th></tr></thead><tbody>{cmd_rows}</tbody></table>
-
     <details class="section">
       <summary>Texture Category Summary</summary>
       <table>
@@ -668,6 +665,9 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
         <tbody>{''.join(summary_rows)}</tbody>
       </table>
     </details>
+
+    <h2 class="section-title">Command Top</h2>
+    <table><thead><tr><th>Command</th><th>Count</th></tr></thead><tbody>{cmd_rows}</tbody></table>
   </main>
   <script>
     document.querySelectorAll('table.sortable th[data-sort]').forEach((th) => {{
