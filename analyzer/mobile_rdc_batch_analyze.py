@@ -565,16 +565,18 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
     <h2 class="section-title">Enhanced Category Details</h2>
     {''.join(enhanced_detail_blocks)}
 
-    <h2 class="section-title">Enhanced Index Texture Usage</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>Index texture</th><th>Categories</th><th>Draws</th><th>Total vertices</th>
-          <th>EID</th><th>Top renderpasses</th><th>Top meshes</th>
-        </tr>
-      </thead>
-      <tbody>{''.join(enhanced_texture_rows)}</tbody>
-    </table>
+    <details class="section">
+      <summary>Enhanced Index Texture Usage</summary>
+      <table>
+        <thead>
+          <tr>
+            <th>Index texture</th><th>Categories</th><th>Draws</th><th>Total vertices</th>
+            <th>EID</th><th>Top renderpasses</th><th>Top meshes</th>
+          </tr>
+        </thead>
+        <tbody>{''.join(enhanced_texture_rows)}</tbody>
+      </table>
+    </details>
 """
 
     cmd_rows = "".join(
@@ -610,6 +612,9 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
     details.eids div {{ margin-top:6px; max-width:820px; overflow-wrap:anywhere; }}
     details.category {{ background:var(--panel); border:1px solid var(--border); border-radius:8px; margin:10px 0; overflow:hidden; }}
     details.category > summary {{ cursor:pointer; display:flex; gap:14px; align-items:center; padding:10px 12px; background:#eef2f7; font-weight:600; }}
+    details.section {{ background:var(--panel); border:1px solid var(--border); border-radius:8px; margin:18px 0; overflow:hidden; }}
+    details.section > summary {{ cursor:pointer; padding:10px 12px; background:#eef2f7; font-size:18px; font-weight:650; }}
+    details.section > table {{ margin:0; border-left:0; border-right:0; border-bottom:0; }}
     summary .cat {{ min-width:210px; color:#0b4aa2; }}
     .toptex {{ padding:10px 12px 0; }}
     .pill {{ display:inline-block; margin:0 6px 6px 0; padding:3px 7px; border:1px solid var(--border); border-radius:999px; background:#fafafa; }}
@@ -638,27 +643,31 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
     <h2 class="section-title">RenderPass/Marker Major Groups</h2>
     {''.join(pass_blocks)}
 
-    <h2 class="section-title">Index Texture Usage</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>Index texture</th><th>Categories</th><th>Draws</th><th>Total vertices</th>
-          <th>EID/chunkIndex</th><th>Top renderpasses</th><th>Top meshes</th>
-        </tr>
-      </thead>
-      <tbody>{''.join(texture_rows)}</tbody>
-    </table>
+    <details class="section">
+      <summary>Index Texture Usage</summary>
+      <table>
+        <thead>
+          <tr>
+            <th>Index texture</th><th>Categories</th><th>Draws</th><th>Total vertices</th>
+            <th>EID/chunkIndex</th><th>Top renderpasses</th><th>Top meshes</th>
+          </tr>
+        </thead>
+        <tbody>{''.join(texture_rows)}</tbody>
+      </table>
+    </details>
 
     {enhanced_section}
 
     <h2 class="section-title">Command Top</h2>
     <table><thead><tr><th>Command</th><th>Count</th></tr></thead><tbody>{cmd_rows}</tbody></table>
 
-    <h2 class="section-title">Texture Category Summary</h2>
-    <table>
-      <thead><tr><th>Category(second field)</th><th>Draws</th><th>Total vertices</th><th>Textured</th><th>_D indexed</th><th>Top index textures</th><th>Top renderpasses</th></tr></thead>
-      <tbody>{''.join(summary_rows)}</tbody>
-    </table>
+    <details class="section">
+      <summary>Texture Category Summary</summary>
+      <table>
+        <thead><tr><th>Category(second field)</th><th>Draws</th><th>Total vertices</th><th>Textured</th><th>_D indexed</th><th>Top index textures</th><th>Top renderpasses</th></tr></thead>
+        <tbody>{''.join(summary_rows)}</tbody>
+      </table>
+    </details>
   </main>
   <script>
     document.querySelectorAll('table.sortable th[data-sort]').forEach((th) => {{
