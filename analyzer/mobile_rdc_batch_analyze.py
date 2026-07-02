@@ -77,6 +77,59 @@ def texture_category(row):
     return row.get("category_by_d_texture") or "unclassified"
 
 
+def is_d_texture_name(name):
+    stem = Path(str(name or "").replace("\\", "/")).name.rsplit(".", 1)[0].lower()
+    return stem.endswith("_d") and not stem.startswith("lightmap")
+
+
+def find_precomputed_rows(source_path, out_dir):
+    candidates = [
+        source_path.with_name(source_path.stem + "_rows.json"),
+        source_path.parent / "renderdoc_mcp_work" / f"{source_path.stem}_rows.json",
+        out_dir / f"{source_path.stem}_rows.json",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def data_from_precomputed_rows(rows_path):
+    source_rows = json.loads(rows_path.read_text(encoding="utf-8"))
+    rows = []
+    for i, row in enumerate(source_rows, 1):
+        primary = row.get("primary_texture") or ""
+        textures = [primary] if primary else []
+        d_textures = [primary] if is_d_texture_name(primary) else []
+        marker = row.get("marker_path") or row.get("pass") or ""
+        rows.append(
+            {
+                "draw_index": i,
+                "chunk_index": row.get("event_id"),
+                "command": row.get("draw_name") or "",
+                "renderpass": marker,
+                "index_count": row.get("num_indices") or 0,
+                "vertex_count": row.get("mesh_vertex_count") or 0,
+                "instance_count": row.get("num_instances") or 1,
+                "descriptor_sets": row.get("vertex_buffer_names") or [],
+                "texture_count": len(textures),
+                "index_texture": primary or row.get("mesh_name") or "-",
+                "index_is_d_texture": bool(d_textures),
+                "category_by_d_texture": row.get("category") or "unclassified",
+                "d_textures": d_textures,
+                "textures": textures,
+                "mesh_name": row.get("mesh_name") or "",
+                "pass": row.get("pass") or "",
+            }
+        )
+    return {
+        "draws": rows,
+        "dispatches": [],
+        "texture_usage": Counter(r["index_texture"] for r in rows if r.get("index_texture")),
+        "command_counts": Counter(r.get("command") or "<unknown>" for r in rows),
+    }
+
+
 def build_category_groups(data):
     by_category = defaultdict(list)
     for row in data.get("draws", []):
@@ -226,6 +279,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                 f"<td class='num'>{r.get('chunk_index')}</td>"
                 f"<td>{html.escape(str(r.get('renderpass') or ''))}</td>"
                 f"<td><code>{html.escape(str(r.get('command') or ''))}</code></td>"
+                f"<td><code>{html.escape(str(r.get('mesh_name') or ''))}</code></td>"
                 f"<td class='num'>{idx_or_vert}</td>"
                 f"<td class='num'>{r.get('instance_count')}</td>"
                 f"<td><code>{html.escape(str(r.get('index_texture') or '-'))}</code></td>"
@@ -247,7 +301,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                 <thead>
                   <tr>
                     <th>Draw</th><th>chunkIndex</th><th>RenderPass/Marker</th><th>Cmd</th>
-                    <th>idx/verts</th><th>inst</th><th>Index texture</th><th>Texture count</th><th>Textures</th>
+                    <th>Mesh</th><th>idx/verts</th><th>inst</th><th>Index texture</th><th>Texture count</th><th>Textures</th>
                   </tr>
                 </thead>
                 <tbody>{''.join(detail_rows)}</tbody>
@@ -412,11 +466,18 @@ def main():
     else:
         raise SystemExit("Input must be .rdc or .xml")
 
-    print("[2/4] Parse draw calls and texture bindings", flush=True)
-    probe_json, probe_md = run_probe(xml_path)
+    driver = detect_driver(xml_path)
+    rows_path = find_precomputed_rows(source_path, out_dir)
+    if driver == "D3D11" and rows_path is not None:
+        print(f"[2/4] Use precomputed pipeline rows: {rows_path}", flush=True)
+        data = data_from_precomputed_rows(rows_path)
+        probe_json = probe_md = None
+    else:
+        print("[2/4] Parse draw calls and texture bindings", flush=True)
+        probe_json, probe_md = run_probe(xml_path)
+        data = json.loads(probe_json.read_text(encoding="utf-8"))
 
     print("[3/4] Write HTML report", flush=True)
-    data = json.loads(probe_json.read_text(encoding="utf-8"))
     by_category = build_category_groups(data)
     html_report = write_html_report(source_path.stem, out_dir, source_path, data, by_category)
 
@@ -427,6 +488,8 @@ def main():
         write_index_md(source_path.stem, out_dir, source_path, xml_path, probe_md, probe_json, summary_csv, detail_csv, detail_md, html_report)
     else:
         for path in (probe_md, probe_json):
+            if path is None:
+                continue
             try:
                 Path(path).unlink()
             except FileNotFoundError:

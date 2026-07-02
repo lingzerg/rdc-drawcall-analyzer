@@ -54,6 +54,12 @@ For D3D11 captures, texture category quality depends on debug names stored in th
 capture. If only generic names like `Texture2D-SRV-*` exist, asset-level `_D`
 classification cannot be recovered from offline XML alone.
 
+For PC captures with precomputed pipeline rows, the analyzer will automatically
+prefer `<capture_name>_rows.json` when it exists either next to the `.rdc` file,
+inside a sibling `renderdoc_mcp_work` folder, or inside the output folder. This
+rows file preserves real asset texture names such as `*_D`, so PC reports can be
+classified by actual texture category instead of generic SRV debug names.
+
 ## Third-party Runtime
 
 `third_party/renderdoc` contains a minimal RenderDoc command-line runtime copied
