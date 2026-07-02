@@ -1,0 +1,6 @@
+analysis_results/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+*.tmp
