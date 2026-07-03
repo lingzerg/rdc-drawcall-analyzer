@@ -21,6 +21,8 @@ SRV_SET_NAMES = {
     "ID3D11DeviceContext::DSSetShaderResources": "DS",
     "ID3D11DeviceContext::CSSetShaderResources": "CS",
 }
+IA_VERTEX_BUFFER_NAME = "ID3D11DeviceContext::IASetVertexBuffers"
+IA_INDEX_BUFFER_NAME = "ID3D11DeviceContext::IASetIndexBuffer"
 
 
 def text_of(elem, default=""):
@@ -85,12 +87,56 @@ def choose_index_texture(textures):
     return (sorted(textures)[0], False) if textures else ("-", False)
 
 
+def is_placeholder_resource_name(name):
+    text = str(name or "")
+    return text.startswith(("Texture2D-SRV-", "Texture2D-", "Buffer-", "ConstantBuffer-"))
+
+
+def choose_resource_name(view, resource, resource_names):
+    view_name = resource_names.get(view, "")
+    resource_name = resource_names.get(resource, "")
+    if resource_name and (not view_name or is_placeholder_resource_name(view_name) or is_d_texture(resource_name)):
+        return resource_name
+    return view_name or resource_name or resource or view
+
+
 def parse_srv_array(chunk):
     for arr in chunk.iter("array"):
         if arr.attrib.get("name") != "ppShaderResourceViews":
             continue
         return [text_of(r) for r in arr.iter("ResourceId")]
     return []
+
+
+def parse_vertex_buffer_array(chunk):
+    for arr in chunk.iter("array"):
+        if arr.attrib.get("name") != "ppVertexBuffers":
+            continue
+        return [text_of(r) for r in arr.iter("ResourceId")]
+    return []
+
+
+def classify_from_mesh(name):
+    stem = clean_texture_name(name)
+    parts = [part for part in stem.split("_") if part]
+    if len(parts) >= 2:
+        return parts[1].lower()
+    if stem and not stem.lower().startswith(("buffer-", "constantbuffer-")):
+        return "mesh_unclassified"
+    return ""
+
+
+def choose_mesh_name(vertex_buffers, index_buffer, resource_names):
+    names = []
+    for rid in vertex_buffers:
+        label = resource_names.get(rid)
+        if label:
+            names.append(label)
+    if index_buffer and resource_names.get(index_buffer):
+        names.append(resource_names[index_buffer])
+    if not names:
+        return ""
+    return Counter(names).most_common(1)[0][0]
 
 
 def write_outputs(xml_path, rows, dispatch_rows, command_counts, resource_names, srv_to_resource):
@@ -170,6 +216,8 @@ def main():
     resource_names = {}
     srv_to_resource = {}
     current_srvs = defaultdict(dict)
+    current_vertex_buffers = []
+    current_index_buffer = ""
     marker_stack = []
     command_counts = Counter()
     rows = []
@@ -202,6 +250,12 @@ def main():
             for i, view in enumerate(views):
                 current_srvs[stage][start_slot + i] = view
 
+        elif name == IA_VERTEX_BUFFER_NAME:
+            current_vertex_buffers = [rid for rid in parse_vertex_buffer_array(chunk) if rid and rid != "0"]
+
+        elif name == IA_INDEX_BUFFER_NAME:
+            current_index_buffer = direct_resource_value(chunk, "pIndexBuffer")
+
         elif name == "ID3DUserDefinedAnnotation::BeginEvent":
             label = child_text(chunk, "string", "Name") or child_text(chunk, "string")
             marker_stack.append(label or f"chunk_{chunk_index}")
@@ -221,13 +275,14 @@ def main():
                         continue
                     bound_views.append(f"{stage}{slot}:{view}")
                     resource = srv_to_resource.get(view, "")
-                    tex_name = resource_names.get(view) or resource_names.get(resource) or resource or view
+                    tex_name = choose_resource_name(view, resource, resource_names)
                     if tex_name:
                         textures.append(tex_name)
             tex_unique = sorted(set(textures))
             d_textures = [t for t in tex_unique if is_d_texture(t)]
             index_texture, index_is_d = choose_index_texture(tex_unique)
-            category = classify_from_texture(index_texture)
+            mesh_name = choose_mesh_name(current_vertex_buffers, current_index_buffer, resource_names)
+            category = classify_from_texture(index_texture) or classify_from_mesh(mesh_name)
             rows.append(
                 {
                     "draw_index": draw_index,
@@ -247,6 +302,7 @@ def main():
                     "instance_count": uint_value(chunk, "InstanceCount", 1) or uint_value(chunk, "instanceCount", 1),
                     "descriptor_sets": bound_views,
                     "texture_count": len(tex_unique),
+                    "mesh_name": mesh_name,
                     "index_texture": index_texture,
                     "index_is_d_texture": index_is_d,
                     "category_by_d_texture": category,
