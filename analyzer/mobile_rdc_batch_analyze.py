@@ -87,7 +87,39 @@ def renderpass_label(row):
     value = row.get("renderpass")
     if value in (None, ""):
         return "no_marker"
+    if value == 0 or value == "0":
+        return "outside"
+    if isinstance(value, int) or str(value).isdigit():
+        return f"RenderPass #{value}"
     return str(value)
+
+
+def renderpass_major_label(row):
+    explicit = row.get("pass")
+    if explicit:
+        return str(explicit)
+    label = renderpass_label(row)
+    parts = [p for p in label.replace("\\", "/").split("/") if p]
+    if len(parts) <= 1:
+        return label
+
+    priority_patterns = [
+        "GBufferPass",
+        "ShadowCasterPass",
+        "TransparentForwardPass",
+        "OffScreenTransparentForwardPass",
+        "Offscreen",
+        "RenderPass",
+        "Camera.Render",
+    ]
+    for pattern in priority_patterns:
+        for part in parts:
+            if pattern.lower() in part.lower():
+                return part
+    for part in parts:
+        if "pass" in part.lower():
+            return part
+    return parts[0]
 
 
 def eid_value(row):
@@ -124,7 +156,7 @@ def html_eids(rows, label="EID/chunkIndex", limit=16):
 def build_renderpass_groups(rows):
     groups = defaultdict(list)
     for row in rows:
-        groups[renderpass_label(row)].append(row)
+        groups[renderpass_major_label(row)].append(row)
     return sorted(groups.items(), key=lambda kv: len(kv[1]), reverse=True)
 
 
@@ -519,6 +551,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
         pass_category_rows = []
         for category, group in sorted(pass_by_category.items(), key=category_sort_key):
             top_idx = Counter(r.get("index_texture") or "-" for r in group).most_common(5)
+            marker_paths = Counter(renderpass_label(r) for r in group).most_common(3)
             pass_category_rows.append(
                 "<tr>"
                 f"<td>{html.escape(category)}</td>"
@@ -527,6 +560,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                 f"<td class='num'>{sum(1 for r in group if r.get('texture_count'))}</td>"
                 f"<td class='num'>{sum(1 for r in group if r.get('index_is_d_texture'))}</td>"
                 f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in top_idx))}</td>"
+                f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in marker_paths))}</td>"
                 f"<td><code>{html.escape(format_eids(group))}</code></td>"
                 "</tr>"
             )
@@ -543,7 +577,8 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                 <thead>
                   <tr>
                     <th>Texture category</th><th>Draws</th><th>Total vertices</th>
-                    <th>Textured</th><th>_D indexed</th><th>Top index textures</th><th>EID/chunkIndex</th>
+                    <th>Textured</th><th>_D indexed</th><th>Top index textures</th>
+                    <th>Top marker paths</th><th>EID/chunkIndex</th>
                   </tr>
                 </thead>
                 <tbody>{''.join(pass_category_rows)}</tbody>

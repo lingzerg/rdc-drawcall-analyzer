@@ -26,6 +26,16 @@ def text_of(elem, default=""):
     return elem.text.strip() if elem is not None and elem.text else default
 
 
+def marker_label(chunk):
+    for s in chunk.iter("string"):
+        if s.attrib.get("name") in ("pMarkerName", "pLabelName", "pName"):
+            label = text_of(s)
+            if label:
+                return label
+    strings = [text_of(s) for s in chunk.iter("string") if text_of(s)]
+    return strings[-1] if strings else ""
+
+
 def child_text(elem, tag, name=None):
     for c in elem.iter(tag):
         if name is None or c.attrib.get("name") == name:
@@ -214,6 +224,7 @@ def main():
     dispatch_index = 0
     current_renderpass = 0
     renderpass_open = False
+    marker_stack = []
 
     for chunk in root.findall("./chunks/chunk"):
         name = chunk.attrib.get("name", "")
@@ -284,6 +295,13 @@ def main():
         elif name == "vkCmdEndRenderPass":
             renderpass_open = False
 
+        elif name in {"vkCmdDebugMarkerBeginEXT", "vkCmdBeginDebugUtilsLabelEXT"}:
+            marker_stack.append(marker_label(chunk) or f"marker_{chunk_index}")
+
+        elif name in {"vkCmdDebugMarkerEndEXT", "vkCmdEndDebugUtilsLabelEXT"}:
+            if marker_stack:
+                marker_stack.pop()
+
         elif name in DRAW_NAMES:
             draw_index += 1
             tex = []
@@ -306,7 +324,8 @@ def main():
                     "draw_index": draw_index,
                     "chunk_index": chunk_index,
                     "command": name,
-                    "renderpass": current_renderpass if renderpass_open else 0,
+                    "renderpass": "/".join(marker_stack) or (current_renderpass if renderpass_open else 0),
+                    "renderpass_index": current_renderpass if renderpass_open else 0,
                     "index_count": uint_value(chunk, "indexCount"),
                     "vertex_count": uint_value(chunk, "vertexCount"),
                     "instance_count": uint_value(chunk, "instanceCount", 1),
@@ -330,7 +349,8 @@ def main():
                     "x": uint_value(chunk, "x"),
                     "y": uint_value(chunk, "y"),
                     "z": uint_value(chunk, "z"),
-                    "renderpass": current_renderpass if renderpass_open else 0,
+                    "renderpass": "/".join(marker_stack) or (current_renderpass if renderpass_open else 0),
+                    "renderpass_index": current_renderpass if renderpass_open else 0,
                 }
             )
 
@@ -422,7 +442,7 @@ def main():
         "| RenderPass | Draws | Textured | `_D` Draws | Dispatches |",
         "|---:|---:|---:|---:|---:|",
     ]
-    for rp, cnt in sorted(renderpass_counter.items()):
+    for rp, cnt in sorted(renderpass_counter.items(), key=lambda kv: (-kv[1]["draws"], str(kv[0]))):
         label = "outside" if rp == 0 else str(rp)
         lines.append(f"| {label} | {cnt['draws']} | {cnt['textured']} | {cnt['d']} | {cnt['dispatch']} |")
 
