@@ -153,6 +153,19 @@ def html_eids(rows, label="EID/chunkIndex", limit=16):
     )
 
 
+def html_folded_values(values, label, empty_label="-"):
+    clean = [str(v) for v in values if str(v)]
+    if not clean:
+        return f'<span class="muted">{html.escape(empty_label)}</span>'
+    body = "<br>".join(f"<code>{html.escape(v)}</code>" for v in clean)
+    return (
+        '<details class="fold-list">'
+        f"<summary>{len(clean)} {html.escape(label)}</summary>"
+        f"<div>{body}</div>"
+        "</details>"
+    )
+
+
 def build_renderpass_groups(rows):
     groups = defaultdict(list)
     for row in rows:
@@ -552,6 +565,8 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
         for category, group in sorted(pass_by_category.items(), key=category_sort_key):
             top_idx = Counter(r.get("index_texture") or "-" for r in group).most_common(5)
             marker_paths = Counter(renderpass_label(r) for r in group).most_common(3)
+            top_idx_values = [f"{k} ({v})" for k, v in top_idx]
+            eids = [eid_value(r) for r in sorted(group, key=lambda r: r.get("draw_index") or 0)]
             pass_category_rows.append(
                 "<tr>"
                 f"<td>{html.escape(category)}</td>"
@@ -559,21 +574,21 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                 f"<td class='num'>{total_vertex_count(group):,}</td>"
                 f"<td class='num'>{sum(1 for r in group if r.get('texture_count'))}</td>"
                 f"<td class='num'>{sum(1 for r in group if r.get('index_is_d_texture'))}</td>"
-                f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in top_idx))}</td>"
+                f"<td>{html_folded_values(top_idx_values, 'textures')}</td>"
                 f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in marker_paths))}</td>"
-                f"<td><code>{html.escape(format_eids(group))}</code></td>"
+                f"<td>{html_folded_values(eids, 'EID')}</td>"
                 "</tr>"
             )
         pass_blocks.append(
             f"""
-            <details class="category">
+            <details class="category pass-group">
               <summary>
                 <span class="cat">{html.escape(pass_name)}</span>
                 <span>{len(pass_group)} draw calls</span>
                 <span>{total_vertex_count(pass_group):,} vertices</span>
                 <span>{sum(1 for r in pass_group if r.get('texture_count'))} textured</span>
               </summary>
-              <table>
+              <table class="pass-table">
                 <thead>
                   <tr>
                     <th>Texture category</th><th>Draws</th><th>Total vertices</th>
@@ -701,10 +716,18 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
     details.eids div {{ margin-top:6px; max-width:820px; overflow-wrap:anywhere; }}
     details.category {{ background:var(--panel); border:1px solid var(--border); border-radius:8px; margin:10px 0; overflow:hidden; }}
     details.category > summary {{ cursor:pointer; display:flex; gap:14px; align-items:center; padding:10px 12px; background:#eef2f7; font-weight:600; }}
+    details.pass-group > summary {{ display:grid; grid-template-columns:minmax(360px, 1fr) repeat(3, max-content); column-gap:28px; row-gap:6px; padding:14px 18px; }}
+    details.pass-group > summary .cat {{ min-width:0; overflow-wrap:anywhere; }}
+    .pass-table th:nth-child(1) {{ min-width:150px; }}
+    .pass-table th:nth-child(6) {{ min-width:150px; }}
+    .pass-table th:nth-child(7) {{ min-width:260px; }}
+    .pass-table th:nth-child(8) {{ min-width:120px; }}
     details.section {{ background:var(--panel); border:1px solid var(--border); border-radius:8px; margin:18px 0; overflow:hidden; }}
     details.section > summary {{ cursor:pointer; padding:10px 12px; background:#eef2f7; font-size:18px; font-weight:650; }}
     details.section > table {{ margin:0; border-left:0; border-right:0; border-bottom:0; }}
     summary .cat {{ min-width:210px; color:#0b4aa2; }}
+    .fold-list > summary {{ cursor:pointer; color:#0b4aa2; white-space:nowrap; }}
+    .fold-list > div {{ margin-top:6px; max-width:520px; overflow-wrap:anywhere; }}
     .toptex {{ padding:10px 12px 0; }}
     .pill {{ display:inline-block; margin:0 6px 6px 0; padding:3px 7px; border:1px solid var(--border); border-radius:999px; background:#fafafa; }}
     .muted {{ color:var(--muted); }}
