@@ -563,7 +563,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
             pass_by_category[texture_category(r)].append(r)
         pass_category_rows = []
         for category, group in sorted(pass_by_category.items(), key=category_sort_key):
-            top_idx = Counter(r.get("index_texture") or "-" for r in group).most_common(5)
+            top_idx = Counter(r.get("index_texture") or "-" for r in group).most_common()
             marker_paths = Counter(renderpass_label(r) for r in group).most_common(3)
             top_idx_values = [f"{k} ({v})" for k, v in top_idx]
             eids = [eid_value(r) for r in sorted(group, key=lambda r: r.get("draw_index") or 0)]
@@ -592,7 +592,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                 <thead>
                   <tr>
                     <th>Texture category</th><th>Draws</th><th>Total vertices</th>
-                    <th>Textured</th><th>_D indexed</th><th>Top index textures</th>
+                    <th>Textured</th><th>_D indexed</th><th>Index textures</th>
                     <th>Top marker paths</th><th>EID/chunkIndex</th>
                   </tr>
                 </thead>
