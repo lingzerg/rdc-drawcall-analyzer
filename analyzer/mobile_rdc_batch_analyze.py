@@ -561,23 +561,43 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
         pass_by_category = defaultdict(list)
         for r in pass_group:
             pass_by_category[texture_category(r)].append(r)
-        pass_category_rows = []
+        pass_category_blocks = []
         for category, group in sorted(pass_by_category.items(), key=category_sort_key):
-            top_idx = Counter(r.get("index_texture") or "-" for r in group).most_common()
             marker_paths = Counter(renderpass_label(r) for r in group).most_common(3)
-            top_idx_values = [f"{k} ({v})" for k, v in top_idx]
-            eids = [eid_value(r) for r in sorted(group, key=lambda r: r.get("draw_index") or 0)]
-            pass_category_rows.append(
-                "<tr>"
-                f"<td>{html.escape(category)}</td>"
-                f"<td class='num'>{len(group)}</td>"
-                f"<td class='num'>{total_vertex_count(group):,}</td>"
-                f"<td class='num'>{sum(1 for r in group if r.get('texture_count'))}</td>"
-                f"<td class='num'>{sum(1 for r in group if r.get('index_is_d_texture'))}</td>"
-                f"<td>{html_folded_values(top_idx_values, 'textures')}</td>"
-                f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in marker_paths))}</td>"
-                f"<td>{html_folded_values(eids, 'EID')}</td>"
-                "</tr>"
+            texture_rows_for_category = []
+            for texture, texture_group in build_index_texture_groups(group):
+                texture_rows_for_category.append(
+                    "<tr>"
+                    f"<td><code>{html.escape(str(texture or '-'))}</code></td>"
+                    f"<td class='num'>{len(texture_group)}</td>"
+                    f"<td class='num'>{total_vertex_count(texture_group):,}</td>"
+                    f"<td>{html_folded_values([eid_value(r) for r in sorted(texture_group, key=lambda r: r.get('draw_index') or 0)], 'EID')}</td>"
+                    f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in Counter(renderpass_label(r) for r in texture_group).most_common(3)))}</td>"
+                    "</tr>"
+                )
+            pass_category_blocks.append(
+                f"""
+                <details class="pass-subgroup">
+                  <summary>
+                    <span class="cat">{html.escape(category)}</span>
+                    <span>{len(group)} draw calls</span>
+                    <span>{total_vertex_count(group):,} vertices</span>
+                    <span>{sum(1 for r in group if r.get('texture_count'))} textured</span>
+                    <span>{sum(1 for r in group if r.get('index_is_d_texture'))} _D indexed</span>
+                    <span>{len(texture_rows_for_category)} textures</span>
+                  </summary>
+                  <div class="marker-paths">{html.escape('; '.join(f'{k} ({v})' for k, v in marker_paths))}</div>
+                  <table class="pass-texture-table">
+                    <thead>
+                      <tr>
+                        <th>Index texture</th><th>Draws</th><th>Total vertices</th>
+                        <th>EID/chunkIndex</th><th>Marker paths</th>
+                      </tr>
+                    </thead>
+                    <tbody>{''.join(texture_rows_for_category)}</tbody>
+                  </table>
+                </details>
+                """
             )
         pass_blocks.append(
             f"""
@@ -588,16 +608,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                 <span>{total_vertex_count(pass_group):,} vertices</span>
                 <span>{sum(1 for r in pass_group if r.get('texture_count'))} textured</span>
               </summary>
-              <table class="pass-table">
-                <thead>
-                  <tr>
-                    <th>Texture category</th><th>Draws</th><th>Total vertices</th>
-                    <th>Textured</th><th>_D indexed</th><th>Index textures</th>
-                    <th>Top marker paths</th><th>EID/chunkIndex</th>
-                  </tr>
-                </thead>
-                <tbody>{''.join(pass_category_rows)}</tbody>
-              </table>
+              <div class="pass-subgroups">{''.join(pass_category_blocks)}</div>
             </details>
             """
         )
@@ -718,10 +729,15 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
     details.category > summary {{ cursor:pointer; display:flex; gap:14px; align-items:center; padding:10px 12px; background:#eef2f7; font-weight:600; }}
     details.pass-group > summary {{ display:grid; grid-template-columns:minmax(320px, 430px) repeat(3, max-content); column-gap:28px; row-gap:6px; padding:14px 18px; }}
     details.pass-group > summary .cat {{ min-width:0; overflow-wrap:anywhere; }}
-    .pass-table th:nth-child(1) {{ min-width:150px; }}
-    .pass-table th:nth-child(6) {{ min-width:150px; }}
-    .pass-table th:nth-child(7) {{ min-width:260px; }}
-    .pass-table th:nth-child(8) {{ min-width:120px; }}
+    .pass-subgroups {{ padding:10px 12px 14px; }}
+    details.pass-subgroup {{ border:1px solid var(--border); border-radius:8px; margin:8px 0; overflow:hidden; background:#fff; }}
+    details.pass-subgroup > summary {{ cursor:pointer; display:grid; grid-template-columns:minmax(150px, 260px) repeat(5, max-content); column-gap:18px; row-gap:6px; align-items:center; padding:9px 10px; background:#f8fafc; font-weight:600; }}
+    details.pass-subgroup > summary .cat {{ min-width:0; overflow-wrap:anywhere; }}
+    .marker-paths {{ padding:8px 10px 0; color:var(--muted); font-size:12px; overflow-wrap:anywhere; }}
+    .pass-texture-table {{ margin:8px 0 0; border-left:0; border-right:0; border-bottom:0; }}
+    .pass-texture-table th:nth-child(1) {{ min-width:260px; }}
+    .pass-texture-table th:nth-child(4) {{ min-width:120px; }}
+    .pass-texture-table th:nth-child(5) {{ min-width:260px; }}
     details.section {{ background:var(--panel); border:1px solid var(--border); border-radius:8px; margin:18px 0; overflow:hidden; }}
     details.section > summary {{ cursor:pointer; padding:10px 12px; background:#eef2f7; font-size:18px; font-weight:650; }}
     details.section > table {{ margin:0; border-left:0; border-right:0; border-bottom:0; }}
