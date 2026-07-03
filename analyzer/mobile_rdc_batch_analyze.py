@@ -224,6 +224,245 @@ def detect_driver(xml_path):
     return (driver.text or "").strip() if driver is not None else ""
 
 
+VULKAN_DRAW_PREFIXES = (
+    "vkCmdDraw",
+    "vkCmdDispatch",
+    "vkCmdTraceRays",
+    "vkCmdDrawMeshTasks",
+)
+
+VULKAN_EVENT_KEYWORDS = (
+    "BeginRenderPass",
+    "EndRenderPass",
+    "NextSubpass",
+    "BeginRendering",
+    "EndRendering",
+    "Clear",
+    "Copy",
+    "Blit",
+    "Resolve",
+    "FillBuffer",
+    "UpdateBuffer",
+    "PipelineBarrier",
+    "WaitEvents",
+    "SetEvent",
+    "ResetEvent",
+    "WriteTimestamp",
+    "BeginQuery",
+    "EndQuery",
+    "ResetQueryPool",
+    "CopyQueryPoolResults",
+    "DebugMarker",
+    "DebugUtilsLabel",
+    "ExecuteCommands",
+    "BuildAccelerationStructures",
+)
+
+D3D11_NO_EVENT_NAMES = {
+    "ID3DUserDefinedAnnotation::BeginEvent",
+    "ID3DUserDefinedAnnotation::EndEvent",
+    "ID3DUserDefinedAnnotation::SetMarker",
+    "ID3D11DeviceContext::SetMarkerInt",
+    "ID3D11DeviceContext::BeginEventInt",
+    "ID3D11DeviceContext::EndEvent",
+}
+
+
+def xml_direct_resource_value(elem, name=None, typename=None):
+    for r in elem:
+        if r.tag != "ResourceId":
+            continue
+        if name is not None and r.attrib.get("name") != name:
+            continue
+        if typename is not None and r.attrib.get("typename") != typename:
+            continue
+        return (r.text or "").strip()
+    return ""
+
+
+def xml_command_buffer_value(chunk):
+    for r in chunk.iter("ResourceId"):
+        if r.attrib.get("typename") != "VkCommandBuffer":
+            continue
+        if r.attrib.get("name") in ("CommandBuffer", "commandBuffer") or not r.attrib.get("name"):
+            return (r.text or "").strip()
+    return ""
+
+
+def vulkan_chunk_generates_action_event(name):
+    if not name.startswith("vkCmd"):
+        return False
+    if name.startswith(VULKAN_DRAW_PREFIXES):
+        return True
+    return any(keyword in name for keyword in VULKAN_EVENT_KEYWORDS)
+
+
+def vulkan_chunk_increments_command_buffer_eid(name):
+    # RenderDoc's Vulkan ReplayLog increments BakedCmdBufferInfo.curEventID for command-buffer
+    # chunks after processing each vkCmd* chunk, except begin/end command buffer and annotations.
+    return name.startswith("vkCmd")
+
+
+def submitted_command_buffers(chunk):
+    buffers = []
+    for arr in chunk.iter("array"):
+        if arr.attrib.get("name") != "pCommandBuffers":
+            continue
+        for r in arr.iter("ResourceId"):
+            if r.attrib.get("typename") == "VkCommandBuffer":
+                value = (r.text or "").strip()
+                if value:
+                    buffers.append(value)
+    if buffers:
+        return buffers
+
+    # vkQueueSubmit2 serialises command buffers inside VkCommandBufferSubmitInfo structs.
+    for struct in chunk.iter("struct"):
+        if struct.attrib.get("typename") not in ("VkCommandBufferSubmitInfo", "VkCommandBufferSubmitInfoKHR"):
+            continue
+        for r in struct.iter("ResourceId"):
+            if r.attrib.get("typename") == "VkCommandBuffer":
+                value = (r.text or "").strip()
+                if value:
+                    buffers.append(value)
+    return buffers
+
+
+def build_vulkan_event_id_map(root):
+    """Recreate RenderDoc's submit-time EID remap for normal Vulkan command buffers.
+
+    RenderDoc records vkCmd* calls under command buffers with local event IDs, then when a
+    vkQueueSubmit is replayed it inserts a queue event, a virtual begin-command-buffer event,
+    the command buffer's local events with an offset, and a virtual end-command-buffer event.
+    The XML export contains chunkIndex and commandBuffer IDs, so we can reconstruct that mapping
+    well enough for draw-call reports without needing GPU replay.
+    """
+
+    local_chunks = defaultdict(list)
+    begin_chunks = {}
+    end_chunks = {}
+
+    for chunk in root.findall("./chunks/chunk"):
+        name = chunk.attrib.get("name", "")
+        chunk_index = int(chunk.attrib.get("chunkIndex", "-1"))
+
+        if name == "vkBeginCommandBuffer":
+            command_buffer = xml_direct_resource_value(chunk, "CommandBuffer", "VkCommandBuffer")
+            if command_buffer:
+                begin_chunks[command_buffer] = chunk_index
+            continue
+
+        if name == "vkEndCommandBuffer":
+            command_buffer = xml_direct_resource_value(chunk, "CommandBuffer", "VkCommandBuffer")
+            if command_buffer:
+                end_chunks[command_buffer] = chunk_index
+            continue
+
+        command_buffer = xml_command_buffer_value(chunk)
+        if command_buffer and vulkan_chunk_increments_command_buffer_eid(name):
+            local_chunks[command_buffer].append(chunk_index)
+
+    local_maps = {}
+    local_counts = {}
+    for command_buffer, chunks in local_chunks.items():
+        local_maps[command_buffer] = {chunk_index: local_eid for local_eid, chunk_index in enumerate(chunks)}
+        local_counts[command_buffer] = len(chunks)
+
+    event_map = {}
+    root_eid = 1
+    submitted = 0
+
+    for chunk in root.findall("./chunks/chunk"):
+        name = chunk.attrib.get("name", "")
+        if name not in ("vkQueueSubmit", "vkQueueSubmit2", "vkQueueSubmit2KHR"):
+            continue
+
+        queue_chunk = int(chunk.attrib.get("chunkIndex", "-1"))
+        event_map[queue_chunk] = root_eid
+        root_eid += 1
+
+        buffers = submitted_command_buffers(chunk)
+        if not buffers:
+            # RenderDoc creates a virtual "No Command Buffers" action.
+            root_eid += 1
+            continue
+
+        for command_buffer in buffers:
+            if command_buffer in begin_chunks:
+                event_map[begin_chunks[command_buffer]] = root_eid
+            root_eid += 1
+
+            base_eid = root_eid
+            for chunk_index, local_eid in local_maps.get(command_buffer, {}).items():
+                event_map[chunk_index] = base_eid + local_eid
+            root_eid += local_counts.get(command_buffer, 0)
+
+            if command_buffer in end_chunks:
+                event_map[end_chunks[command_buffer]] = root_eid
+            root_eid += 1
+            submitted += 1
+
+    return event_map, {
+        "source": "renderdoc_offline_vulkan_submit_map",
+        "mapped_chunks": len(event_map),
+        "submitted_command_buffers": submitted,
+        "command_buffers_with_events": len(local_maps),
+        "max_event_id": max(event_map.values()) if event_map else 0,
+    }
+
+
+def d3d11_chunk_generates_event(name):
+    # D3D11 replay increments m_CurEventID per replay chunk, while annotation chunks do not create
+    # events. XML contains the frame chunks in order, so this gives a stable UI-like EID fallback.
+    return name.startswith("ID3D11") and name not in D3D11_NO_EVENT_NAMES
+
+
+def build_d3d11_event_id_map(root):
+    event_map = {}
+    event_id = 1
+    for chunk in root.findall("./chunks/chunk"):
+        name = chunk.attrib.get("name", "")
+        chunk_index = int(chunk.attrib.get("chunkIndex", "-1"))
+        if d3d11_chunk_generates_event(name):
+            event_map[chunk_index] = event_id
+        if name not in D3D11_NO_EVENT_NAMES and name.startswith(("ID3D11", "ID3DUserDefinedAnnotation")):
+            event_id += 1
+    return event_map, {
+        "source": "renderdoc_offline_d3d11_chunk_order",
+        "mapped_chunks": len(event_map),
+        "max_event_id": max(event_map.values()) if event_map else 0,
+    }
+
+
+def build_event_id_map(xml_path, driver=None):
+    root = ET.parse(xml_path).getroot()
+    driver = driver if driver is not None else detect_driver(xml_path)
+    if driver == "Vulkan":
+        return build_vulkan_event_id_map(root)
+    if driver == "D3D11":
+        return build_d3d11_event_id_map(root)
+    return {}, {"source": "unsupported_driver", "mapped_chunks": 0, "driver": driver}
+
+
+def apply_event_id_map(data, event_map, metadata):
+    mapped = 0
+    for row in data.get("draws", []):
+        chunk_index = row.get("chunk_index")
+        try:
+            key = int(chunk_index)
+        except (TypeError, ValueError):
+            continue
+        event_id = event_map.get(key)
+        if event_id is None:
+            continue
+        row["xml_chunk_index"] = chunk_index
+        row["event_id"] = event_id
+        mapped += 1
+    data["event_id_map"] = metadata
+    data["event_id_mapped_draws"] = mapped
+    return mapped
+
+
 def run_probe(xml_path):
     driver = detect_driver(xml_path)
     if driver == "D3D11":
@@ -363,6 +602,7 @@ def write_csvs(data, stem, out_dir):
             fieldnames=[
                 "category_second_field",
                 "draw_index",
+                "event_id",
                 "chunk_index",
                 "renderpass",
                 "command",
@@ -384,6 +624,7 @@ def write_csvs(data, stem, out_dir):
                 {
                     "category_second_field": texture_category(r),
                     "draw_index": r.get("draw_index"),
+                    "event_id": r.get("event_id"),
                     "chunk_index": r.get("chunk_index"),
                     "renderpass": r.get("renderpass"),
                     "command": r.get("command"),
@@ -498,6 +739,9 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
     d_indexed = sum(1 for r in rows if r.get("index_is_d_texture"))
     category_total = sum(len(group) for _, group in ordered)
     enhanced_merged = data.get("enhanced_merged_draws") or sum(1 for r in rows if r.get("enhanced_match"))
+    event_meta = data.get("event_id_map") or {}
+    event_mapped = data.get("event_id_mapped_draws") or 0
+    eid_label = "EID" if event_mapped else "chunkIndex"
 
     summary_rows = []
     for category, group in ordered:
@@ -515,7 +759,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
             "</tr>"
         )
 
-    def make_category_detail_blocks(source_rows, eid_label="EID/chunkIndex", id_prefix=""):
+    def make_category_detail_blocks(source_rows, eid_label=eid_label, id_prefix=""):
         grouped = defaultdict(list)
         for row in source_rows:
             grouped[texture_category(row)].append(row)
@@ -553,7 +797,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
         return blocks
 
     category_detail_rows = rows
-    category_detail_label = "EID/chunkIndex"
+    category_detail_label = eid_label
     detail_blocks = make_category_detail_blocks(category_detail_rows, category_detail_label)
 
     pass_blocks = []
@@ -571,7 +815,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                     f"<td><code>{html.escape(str(texture or '-'))}</code></td>"
                     f"<td class='num'>{len(texture_group)}</td>"
                     f"<td class='num'>{total_vertex_count(texture_group):,}</td>"
-                    f"<td>{html_folded_values([eid_value(r) for r in sorted(texture_group, key=lambda r: r.get('draw_index') or 0)], 'EID')}</td>"
+                    f"<td>{html_folded_values([eid_value(r) for r in sorted(texture_group, key=lambda r: r.get('draw_index') or 0)], eid_label)}</td>"
                     f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in Counter(renderpass_label(r) for r in texture_group).most_common(3)))}</td>"
                     "</tr>"
                 )
@@ -591,7 +835,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                     <thead>
                       <tr>
                         <th>Index texture</th><th>Draws</th><th>Total vertices</th>
-                        <th>EID/chunkIndex</th><th>Marker paths</th>
+                        <th>{html.escape(eid_label)}</th><th>Marker paths</th>
                       </tr>
                     </thead>
                     <tbody>{''.join(texture_rows_for_category)}</tbody>
@@ -764,6 +1008,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
       <div class="card">Categorized draws<b>{category_total}</b></div>
       <div class="card">Enhanced texture rows<b>{len(enhanced_rows)}</b></div>
       <div class="card">Merged enhanced draws<b>{enhanced_merged}</b></div>
+      <div class="card">EID mapped draws<b>{event_mapped}</b><span class="muted">{html.escape(str(event_meta.get('source') or 'fallback'))}</span></div>
     </div>
 
     <h2 class="section-title">RenderPass/Marker Major Groups</h2>
@@ -778,7 +1023,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
         <thead>
           <tr>
             <th>Index texture</th><th>Categories</th><th>Draws</th><th>Total vertices</th>
-            <th>EID/chunkIndex</th><th>Top renderpasses</th><th>Top meshes</th>
+            <th>{html.escape(eid_label)}</th><th>Top renderpasses</th><th>Top meshes</th>
           </tr>
         </thead>
         <tbody>{''.join(texture_rows)}</tbody>
@@ -860,15 +1105,15 @@ def write_category_detail_md(stem, out_dir, by_category):
             f"- Textured: {sum(1 for r in group if r.get('texture_count'))}",
             f"- `_D` indexed: {sum(1 for r in group if r.get('index_is_d_texture'))}",
             "",
-            "| Index texture | Mesh | Vertices | Draw # | Textures | Texture count | chunkIndex | RenderPass | Cmd | idx/verts | inst |",
-            "|---|---|---:|---:|---|---:|---:|---|---|---:|---:|",
+            "| Index texture | Mesh | Vertices | Draw # | Textures | Texture count | EID | chunkIndex | RenderPass | Cmd | idx/verts | inst |",
+            "|---|---|---:|---:|---|---:|---:|---:|---|---|---:|---:|",
         ]
         for r in group:
             idx_or_vert = r.get("index_count") or r.get("vertex_count") or 0
             lines.append(
                 f"| `{r.get('index_texture')}` | `{r.get('mesh_name')}` | {draw_vertex_count(r)} | {r.get('draw_index')} | "
                 f"{md_texture_list(r.get('textures') or [])} | {r.get('texture_count')} | "
-                f"{r.get('chunk_index')} | {r.get('renderpass')} | `{r.get('command')}` | "
+                f"{r.get('event_id') or '-'} | {r.get('chunk_index')} | {r.get('renderpass')} | `{r.get('command')}` | "
                 f"{idx_or_vert} | {r.get('instance_count')} |"
             )
 
@@ -939,6 +1184,15 @@ def main():
         print("[2/4] Parse draw calls and texture bindings", flush=True)
         probe_json, probe_md = run_probe(xml_path)
         data = json.loads(probe_json.read_text(encoding="utf-8"))
+
+    print("      Build offline EID map", flush=True)
+    event_map, event_meta = build_event_id_map(xml_path, driver)
+    mapped_draws = apply_event_id_map(data, event_map, event_meta)
+    print(
+        f"      EID map: {event_meta.get('source')} mapped {mapped_draws}/{len(data.get('draws', []))} draws; "
+        f"max EID {event_meta.get('max_event_id', 0)}",
+        flush=True,
+    )
 
     print("[3/4] Write HTML report", flush=True)
     by_category = build_category_groups(data)
