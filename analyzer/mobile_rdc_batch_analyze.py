@@ -766,11 +766,11 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
       <div class="card">Merged enhanced draws<b>{enhanced_merged}</b></div>
     </div>
 
-    <h2 class="section-title">Category Details</h2>
-    {''.join(detail_blocks)}
-
     <h2 class="section-title">RenderPass/Marker Major Groups</h2>
     {''.join(pass_blocks)}
+
+    <h2 class="section-title">Category Details</h2>
+    {''.join(detail_blocks)}
 
     <details class="section">
       <summary>Index Texture Usage</summary>
