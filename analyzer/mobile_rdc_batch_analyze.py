@@ -716,7 +716,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
     details.eids div {{ margin-top:6px; max-width:820px; overflow-wrap:anywhere; }}
     details.category {{ background:var(--panel); border:1px solid var(--border); border-radius:8px; margin:10px 0; overflow:hidden; }}
     details.category > summary {{ cursor:pointer; display:flex; gap:14px; align-items:center; padding:10px 12px; background:#eef2f7; font-weight:600; }}
-    details.pass-group > summary {{ display:grid; grid-template-columns:minmax(360px, 1fr) repeat(3, max-content); column-gap:28px; row-gap:6px; padding:14px 18px; }}
+    details.pass-group > summary {{ display:grid; grid-template-columns:minmax(320px, 430px) repeat(3, max-content); column-gap:28px; row-gap:6px; padding:14px 18px; }}
     details.pass-group > summary .cat {{ min-width:0; overflow-wrap:anywhere; }}
     .pass-table th:nth-child(1) {{ min-width:150px; }}
     .pass-table th:nth-child(6) {{ min-width:150px; }}
