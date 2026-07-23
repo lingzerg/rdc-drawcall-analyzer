@@ -6,6 +6,7 @@ set "ROOT=%~dp0"
 set "SCRIPT=%ROOT%analyzer\mobile_rdc_batch_analyze.py"
 set "PY=%ROOT%runtime\python\python.exe"
 set "BUNDLED_RD=%ROOT%third_party\renderdoc\renderdoccmd.exe"
+set "RD_ARG="
 
 if not exist "%PY%" (
   set "PY=python"
@@ -50,7 +51,18 @@ if exist "%ROOT%runtime\python\python.exe" (
   echo Python runtime: system PATH
 )
 
-if exist "%BUNDLED_RD%" (
+if defined RDC_ANALYZER_RENDERDOCCMD (
+  if exist "%RDC_ANALYZER_RENDERDOCCMD%" (
+    echo RenderDoc runtime: override
+    echo   %RDC_ANALYZER_RENDERDOCCMD%
+    set "RD_ARG=--renderdoccmd=%RDC_ANALYZER_RENDERDOCCMD%"
+  ) else (
+    echo [ERROR] RDC_ANALYZER_RENDERDOCCMD points to a missing file:
+    echo   %RDC_ANALYZER_RENDERDOCCMD%
+    pause
+    exit /b 1
+  )
+) else if exist "%BUNDLED_RD%" (
   echo RenderDoc runtime: bundled
 ) else if exist "C:\Program Files\RenderDoc\renderdoccmd.exe" (
   echo RenderDoc runtime: installed
@@ -90,7 +102,22 @@ if "%CAPTURE%"=="" (
 )
 
 set "CAPTURE=%CAPTURE:"=%"
-"%PY%" "%SCRIPT%" "%CAPTURE%"
+"%PY%" "%SCRIPT%" "%CAPTURE%" %RD_ARG%
+set "EXIT_CODE=%ERRORLEVEL%"
 
 echo.
-pause
+echo ==========================================
+if "%EXIT_CODE%"=="0" (
+  echo [SUCCESS] Analysis completed successfully.
+  echo Check the HTML report under:
+  echo   %ROOT%analysis_results
+) else (
+  echo [FAILED] Analysis stopped with exit code %EXIT_CODE%.
+  echo Review the error above and the analysis.log file
+  echo in the corresponding folder under:
+  echo   %ROOT%analysis_results
+)
+echo ==========================================
+echo Press any key to exit this window...
+pause >nul
+exit /b %EXIT_CODE%

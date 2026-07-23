@@ -1,16 +1,63 @@
 import argparse
 import csv
+from datetime import datetime
 import html
 import json
+import os
 import re
 import subprocess
 import sys
+import traceback
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 from pathlib import Path
 
 
 DEFAULT_RENDERDOCCMD = Path(r"C:\Program Files\RenderDoc\renderdoccmd.exe")
+
+
+class TeeStream:
+    """Write diagnostic output to both the console and the analysis log."""
+
+    def __init__(self, console, log_file):
+        self.console = console
+        self.log_file = log_file
+
+    def write(self, text):
+        self.console.write(text)
+        self.log_file.write(text)
+        self.log_file.flush()
+        return len(text)
+
+    def flush(self):
+        self.console.flush()
+        self.log_file.flush()
+
+    def isatty(self):
+        return self.console.isatty()
+
+
+def configure_logging(out_dir):
+    log_path = out_dir / "analysis.log"
+    log_file = log_path.open("a", encoding="utf-8", buffering=1)
+    sys.stdout = TeeStream(sys.__stdout__, log_file)
+    sys.stderr = TeeStream(sys.__stderr__, log_file)
+    print(f"\n{'=' * 72}")
+    print(f"Analysis started: {datetime.now().isoformat(timespec='seconds')}")
+    print(f"Python: {sys.executable}")
+    print(f"Working directory: {Path.cwd()}")
+    print(f"Log file: {log_path}")
+    print("=" * 72)
+    return log_path
+
+
+def print_command_result(label, cmd, result):
+    print(f"[command] {label}: {' '.join(map(str, cmd))}")
+    print(f"[command] {label} exit code: {result.returncode}")
+    if result.stdout:
+        print(f"[command] {label} stdout:\n{result.stdout.rstrip()}")
+    if result.stderr:
+        print(f"[command] {label} stderr:\n{result.stderr.rstrip()}", file=sys.stderr)
 
 
 def clean_input_path(raw):
@@ -125,6 +172,8 @@ def renderpass_major_label(row):
 def eid_value(row):
     if row.get("event_id") not in (None, ""):
         return str(row.get("event_id"))
+    if row.get("estimated_event_id") not in (None, ""):
+        return str(row.get("estimated_event_id"))
     value = row.get("chunk_index")
     if value in (None, ""):
         return "-"
@@ -195,6 +244,10 @@ def find_renderdoccmd(explicit=None):
     candidates = []
     if explicit:
         candidates.append(Path(explicit))
+    for env_name in ("RDC_ANALYZER_RENDERDOCCMD", "RENDERDOCCMD"):
+        env_value = os.environ.get(env_name)
+        if env_value:
+            candidates.append(Path(env_value))
     repo_root = Path(__file__).resolve().parent.parent
     candidates.append(repo_root / "third_party" / "renderdoc" / "renderdoccmd.exe")
     candidates.append(DEFAULT_RENDERDOCCMD)
@@ -206,6 +259,7 @@ def find_renderdoccmd(explicit=None):
 
 def run_convert(renderdoccmd, rdc_path, xml_path, force=False):
     if xml_path.exists() and not force and xml_path.stat().st_mtime >= rdc_path.stat().st_mtime:
+        print(f"[command] convert: use cached XML {xml_path}")
         return
     cmd = [
         str(renderdoccmd),
@@ -215,7 +269,37 @@ def run_convert(renderdoccmd, rdc_path, xml_path, force=False):
         "--input-format=rdc",
         "--convert-format=xml",
     ]
-    subprocess.run(cmd, check=True)
+    result = subprocess.run(cmd, check=False, capture_output=True, text=True, errors="replace")
+    print_command_result("convert", cmd, result)
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(
+            result.returncode, cmd, output=result.stdout, stderr=result.stderr
+        )
+
+
+def run_actionmap(renderdoccmd, rdc_path, csv_path, force=False):
+    if csv_path.exists() and not force and csv_path.stat().st_mtime >= rdc_path.stat().st_mtime:
+        return True, "cached"
+    cmd = [
+        str(renderdoccmd),
+        "actionmap",
+        f"--filename={rdc_path}",
+        f"--output={csv_path}",
+    ]
+    try:
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True, errors="replace")
+    except OSError as exc:
+        print(f"[command] actionmap failed to start: {exc}", file=sys.stderr)
+        return False, str(exc)
+    print_command_result("actionmap", cmd, result)
+    if result.returncode != 0:
+        message = (result.stderr or result.stdout or "").strip()
+        if "is not a valid command" in message:
+            message = "renderdoccmd does not support actionmap"
+        elif message:
+            message = message.splitlines()[0]
+        return False, message or f"renderdoccmd actionmap exited with {result.returncode}"
+    return True, (result.stdout or "").strip()
 
 
 def detect_driver(xml_path):
@@ -444,7 +528,33 @@ def build_event_id_map(xml_path, driver=None):
     return {}, {"source": "unsupported_driver", "mapped_chunks": 0, "driver": driver}
 
 
-def apply_event_id_map(data, event_map, metadata):
+def load_official_actionmap(csv_path):
+    event_map = {}
+    rows = 0
+    with Path(csv_path).open("r", newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows += 1
+            chunk = row.get("mainChunkIndex")
+            event_id = row.get("eventId")
+            try:
+                chunk_key = int(chunk)
+                event_value = int(event_id)
+            except (TypeError, ValueError):
+                continue
+            # APIEvent::NoChunk is used for virtual/fake markers, not XML chunks.
+            if chunk_key == 0xFFFFFFFF:
+                continue
+            event_map[chunk_key] = event_value
+    return event_map, {
+        "source": "renderdoc_actionmap",
+        "mapped_chunks": len(event_map),
+        "action_rows": rows,
+        "max_event_id": max(event_map.values()) if event_map else 0,
+    }
+
+
+def apply_event_id_map(data, event_map, metadata, field_name="event_id"):
     mapped = 0
     for row in data.get("draws", []):
         chunk_index = row.get("chunk_index")
@@ -456,10 +566,14 @@ def apply_event_id_map(data, event_map, metadata):
         if event_id is None:
             continue
         row["xml_chunk_index"] = chunk_index
-        row["event_id"] = event_id
+        row[field_name] = event_id
         mapped += 1
-    data["event_id_map"] = metadata
-    data["event_id_mapped_draws"] = mapped
+    if field_name == "event_id":
+        data["event_id_map"] = metadata
+        data["event_id_mapped_draws"] = mapped
+    else:
+        data["estimated_event_id_map"] = metadata
+        data["estimated_event_id_mapped_draws"] = mapped
     return mapped
 
 
@@ -603,6 +717,7 @@ def write_csvs(data, stem, out_dir):
                 "category_second_field",
                 "draw_index",
                 "event_id",
+                "estimated_event_id",
                 "chunk_index",
                 "renderpass",
                 "command",
@@ -625,6 +740,7 @@ def write_csvs(data, stem, out_dir):
                     "category_second_field": texture_category(r),
                     "draw_index": r.get("draw_index"),
                     "event_id": r.get("event_id"),
+                    "estimated_event_id": r.get("estimated_event_id"),
                     "chunk_index": r.get("chunk_index"),
                     "renderpass": r.get("renderpass"),
                     "command": r.get("command"),
@@ -741,7 +857,23 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
     enhanced_merged = data.get("enhanced_merged_draws") or sum(1 for r in rows if r.get("enhanced_match"))
     event_meta = data.get("event_id_map") or {}
     event_mapped = data.get("event_id_mapped_draws") or 0
-    eid_label = "EID" if event_mapped else "chunkIndex"
+    estimated_meta = data.get("estimated_event_id_map") or {}
+    estimated_mapped = data.get("estimated_event_id_mapped_draws") or 0
+    if event_mapped:
+        eid_label = "EID"
+        eid_source = str(event_meta.get("source") or "renderdoc_actionmap")
+        eid_card_label = "Official EID mapped draws"
+        eid_card_value = event_mapped
+    elif estimated_mapped:
+        eid_label = "estimated EID"
+        eid_source = str(estimated_meta.get("source") or "offline_estimate")
+        eid_card_label = "Estimated EID mapped draws"
+        eid_card_value = estimated_mapped
+    else:
+        eid_label = "chunkIndex"
+        eid_source = str(event_meta.get("source") or estimated_meta.get("source") or "fallback_chunkIndex")
+        eid_card_label = "EID mapped draws"
+        eid_card_value = 0
 
     summary_rows = []
     for category, group in ordered:
@@ -1008,7 +1140,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
       <div class="card">Categorized draws<b>{category_total}</b></div>
       <div class="card">Enhanced texture rows<b>{len(enhanced_rows)}</b></div>
       <div class="card">Merged enhanced draws<b>{enhanced_merged}</b></div>
-      <div class="card">EID mapped draws<b>{event_mapped}</b><span class="muted">{html.escape(str(event_meta.get('source') or 'fallback'))}</span></div>
+      <div class="card">{html.escape(eid_card_label)}<b>{eid_card_value}</b><span class="muted">{html.escape(eid_source)}</span></div>
     </div>
 
     <h2 class="section-title">RenderPass/Marker Major Groups</h2>
@@ -1105,15 +1237,15 @@ def write_category_detail_md(stem, out_dir, by_category):
             f"- Textured: {sum(1 for r in group if r.get('texture_count'))}",
             f"- `_D` indexed: {sum(1 for r in group if r.get('index_is_d_texture'))}",
             "",
-            "| Index texture | Mesh | Vertices | Draw # | Textures | Texture count | EID | chunkIndex | RenderPass | Cmd | idx/verts | inst |",
-            "|---|---|---:|---:|---|---:|---:|---:|---|---|---:|---:|",
+            "| Index texture | Mesh | Vertices | Draw # | Textures | Texture count | EID | estimated EID | chunkIndex | RenderPass | Cmd | idx/verts | inst |",
+            "|---|---|---:|---:|---|---:|---:|---:|---:|---|---|---:|---:|",
         ]
         for r in group:
             idx_or_vert = r.get("index_count") or r.get("vertex_count") or 0
             lines.append(
                 f"| `{r.get('index_texture')}` | `{r.get('mesh_name')}` | {draw_vertex_count(r)} | {r.get('draw_index')} | "
                 f"{md_texture_list(r.get('textures') or [])} | {r.get('texture_count')} | "
-                f"{r.get('event_id') or '-'} | {r.get('chunk_index')} | {r.get('renderpass')} | `{r.get('command')}` | "
+                f"{r.get('event_id') or '-'} | {r.get('estimated_event_id') or '-'} | {r.get('chunk_index')} | {r.get('renderpass')} | `{r.get('command')}` | "
                 f"{idx_or_vert} | {r.get('instance_count')} |"
             )
 
@@ -1157,10 +1289,14 @@ def main():
     repo_root = Path(__file__).resolve().parent.parent
     out_dir = repo_root / "analysis_results" / source_path.stem
     out_dir.mkdir(parents=True, exist_ok=True)
+    log_path = configure_logging(out_dir)
+    print(f"Input capture: {source_path}")
+    print(f"Input size: {source_path.stat().st_size} bytes")
+    renderdoccmd = find_renderdoccmd(args.renderdoccmd)
+    print(f"RenderDoc command: {renderdoccmd}")
 
     if source_path.suffix.lower() == ".rdc":
         xml_path = out_dir / f"{source_path.stem}.xml"
-        renderdoccmd = find_renderdoccmd(args.renderdoccmd)
         print(f"[1/4] Convert RDC to XML: {xml_path}", flush=True)
         run_convert(renderdoccmd, source_path, xml_path, args.force_convert)
     elif source_path.suffix.lower() == ".xml":
@@ -1185,14 +1321,34 @@ def main():
         probe_json, probe_md = run_probe(xml_path)
         data = json.loads(probe_json.read_text(encoding="utf-8"))
 
-    print("      Build offline EID map", flush=True)
-    event_map, event_meta = build_event_id_map(xml_path, driver)
-    mapped_draws = apply_event_id_map(data, event_map, event_meta)
-    print(
-        f"      EID map: {event_meta.get('source')} mapped {mapped_draws}/{len(data.get('draws', []))} draws; "
-        f"max EID {event_meta.get('max_event_id', 0)}",
-        flush=True,
-    )
+    official_mapped = 0
+    if source_path.suffix.lower() == ".rdc":
+        actionmap_csv = out_dir / f"{source_path.stem}_renderdoc_actionmap.csv"
+        print("      Try RenderDoc official actionmap EID export", flush=True)
+        ok, message = run_actionmap(renderdoccmd, source_path, actionmap_csv, args.force_convert)
+        if ok:
+            official_map, official_meta = load_official_actionmap(actionmap_csv)
+            official_meta["path"] = str(actionmap_csv)
+            official_mapped = apply_event_id_map(data, official_map, official_meta, "event_id")
+            print(
+                f"      Official EID map: mapped {official_mapped}/{len(data.get('draws', []))} draws; "
+                f"max EID {official_meta.get('max_event_id', 0)}",
+                flush=True,
+            )
+        else:
+            data["event_id_map"] = {"source": "renderdoc_actionmap_unavailable", "message": message}
+            data["event_id_mapped_draws"] = 0
+            print(f"      Official actionmap unavailable: {message}", flush=True)
+
+    if official_mapped == 0:
+        print("      Build estimated offline EID map", flush=True)
+        event_map, event_meta = build_event_id_map(xml_path, driver)
+        mapped_draws = apply_event_id_map(data, event_map, event_meta, "estimated_event_id")
+        print(
+            f"      Estimated EID map: {event_meta.get('source')} mapped {mapped_draws}/{len(data.get('draws', []))} draws; "
+            f"max estimated EID {event_meta.get('max_event_id', 0)}",
+            flush=True,
+        )
 
     print("[3/4] Write HTML report", flush=True)
     by_category = build_category_groups(data)
@@ -1221,7 +1377,12 @@ def main():
     print("Done.")
     print(f"HTML report: {html_report}")
     print(f"Output folder: {out_dir}")
+    print(f"Log file: {log_path}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BaseException:
+        traceback.print_exc()
+        raise
