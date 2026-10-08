@@ -7,6 +7,10 @@ from pathlib import Path
 
 
 DRAW_NAMES = {"vkCmdDraw", "vkCmdDrawIndexed", "vkCmdDrawIndirect", "vkCmdDrawIndexedIndirect"}
+DRAW_NAMES.update({"vkCmdDrawIndirectCount", "vkCmdDrawIndexedIndirectCount",
+                   "vkCmdDrawIndirectCountKHR", "vkCmdDrawIndexedIndirectCountKHR",
+                   "vkCmdDrawIndirectCountAMD", "vkCmdDrawIndexedIndirectCountAMD",
+                   "vkCmdDrawMultiEXT", "vkCmdDrawMultiIndexedEXT"})
 DISPATCH_NAMES = {"vkCmdDispatch", "vkCmdDispatchIndirect"}
 IMAGE_DESCRIPTOR_TYPES = {
     "VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER",

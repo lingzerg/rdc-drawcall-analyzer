@@ -70,16 +70,123 @@ def clean_input_path(raw):
 
 
 def draw_vertex_count(row):
-    base = row.get("index_count") or row.get("vertex_count") or 0
-    inst = row.get("instance_count") or 1
+    if row.get("geometry_status") == "unknown":
+        return None
+    base = row.get("index_count") if row.get("indexed", "Indexed" in str(row.get("command"))) else row.get("vertex_count")
+    inst = row.get("instance_count", 1)
     try:
         return int(base) * int(inst)
     except (TypeError, ValueError):
-        return 0
+        return None
 
 
 def total_vertex_count(rows):
-    return sum(draw_vertex_count(r) for r in rows)
+    return sum(draw_vertex_count(r) or 0 for r in rows)
+
+
+def geometry_total_text(rows, unique=False):
+    values = [r.get("unique_vertex_references") if unique else draw_vertex_count(r) for r in rows]
+    missing = sum(v is None for v in values)
+    known = sum(v for v in values if v is not None)
+    if missing == len(values) and missing:
+        return "Unknown"
+    return f"{known:,}" + (f" (+{missing} unknown draws)" if missing else "")
+
+
+def count_text(value):
+    return "Unknown" if value is None else f"{value:,}"
+
+
+def prepare_offline_rows(data):
+    for row in data.get("draws", []):
+        # XML records commands, not necessarily each execution of those commands.
+        row.pop("event_id", None)
+        row.pop("estimated_event_id", None)
+        command = str(row.get("command", ""))
+        row["indexed"] = "Indexed" in command
+        if "Indirect" in command or "DrawAuto" in command or "DrawMulti" in command:
+            row["index_count"] = row["vertex_count"] = row["instance_count"] = None
+            row["geometry_status"] = "unknown"
+        else:
+            row["geometry_status"] = "command_parameters"
+    data["analysis_mode"] = "offline_commands"
+
+
+def run_replay_export(rdc_path, csv_path):
+    exporter = Path(__file__).resolve().parent.parent / "third_party/renderdoc/rdc_replay_export.exe"
+    if not exporter.exists():
+        return False, "Bundled replay exporter is missing"
+    partial = csv_path.with_suffix(".partial.csv")
+    partial.unlink(missing_ok=True)
+    cmd = [str(exporter), str(rdc_path), str(partial)]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600)
+        print_command_result("official replay export", cmd, result)
+        if result.returncode or not partial.exists():
+            return False, (result.stderr or f"Exporter exited with {result.returncode}").strip()
+        # Only a complete, validated export can replace an earlier successful export.
+        data_from_replay_export(partial)
+        partial.replace(csv_path)
+        return True, ""
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+    finally:
+        partial.unlink(missing_ok=True)
+
+
+def data_from_replay_export(csv_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("texture_rules", Path(__file__).with_name("mobile_texture_xml_probe.py"))
+    rules = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rules)
+    draws, dispatches, seen = [], [], set()
+    with Path(csv_path).open(encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        required = {"eventId", "flags", "numIndices", "numInstances", "kind", "uniqueVertices", "textureNames"}
+        if not required.issubset(reader.fieldnames or []):
+            raise ValueError("Incomplete official replay export header")
+        for action in reader:
+            eid = int(action["eventId"])
+            if eid <= 0 or eid in seen:
+                raise ValueError(f"Duplicate or invalid official EID: {eid}")
+            seen.add(eid)
+            flags = int(action["flags"])
+            count = int(action["numIndices"])
+            raw_instances = int(action["numInstances"])
+            if count < 0 or raw_instances < 0 or action["kind"] not in {"draw", "dispatch"}:
+                raise ValueError(f"Invalid action parameters at EID {eid}")
+            instances = raw_instances if flags & 0x20000 else 1
+            indexed = bool(int(action["indexed"]))
+            textures = sorted(set(filter(None, action["textureNames"].splitlines())))
+            texture, is_d = rules.choose_index_texture(textures)
+            mesh = action["meshNames"]
+            category = rules.classify_from_texture(texture) if texture != "-" else ""
+            if not category:
+                category = rules.classify_from_texture(mesh.splitlines()[0]) if mesh else ""
+            unique = int(action["uniqueVertices"]) if action["uniqueVertices"] else None
+            chunk = int(action["mainChunkIndex"])
+            row = {
+                "draw_index": len(draws) + 1, "event_id": eid,
+                "chunk_index": None if chunk == 0xFFFFFFFF else chunk,
+                "action_id": int(action["actionId"]), "command": action["name"],
+                "renderpass": action["path"], "indexed": indexed,
+                "index_count": count if indexed else 0, "vertex_count": 0 if indexed else count,
+                "instance_count": instances, "raw_num_instances": raw_instances,
+                "geometry_status": "official_action", "mesh_name": mesh,
+                "textures": textures, "texture_count": len(textures), "index_texture": texture,
+                "index_is_d_texture": is_d, "category_by_d_texture": category or "unclassified",
+                "d_textures": [t for t in textures if rules.is_d_texture(t)],
+                "unique_vertices": unique,
+                "unique_vertex_references": unique * instances if unique is not None else None,
+            }
+            for key in ("indexOffset", "baseVertex", "vertexOffset", "instanceOffset", "drawIndex"):
+                row[key] = int(action[key])
+            (draws if action["kind"] == "draw" else dispatches).append(row)
+    return {
+        "draws": draws, "dispatches": dispatches, "analysis_mode": "official_replay",
+        "event_id_mapped_draws": len(draws), "event_id_map": {"source": "RenderDoc GetRootActions"},
+        "command_counts": dict(Counter(r["command"] for r in draws + dispatches)),
+    }
 
 
 def normalize_draw_command(name):
@@ -172,12 +279,10 @@ def renderpass_major_label(row):
 def eid_value(row):
     if row.get("event_id") not in (None, ""):
         return str(row.get("event_id"))
-    if row.get("estimated_event_id") not in (None, ""):
-        return str(row.get("estimated_event_id"))
     value = row.get("chunk_index")
     if value in (None, ""):
         return "-"
-    return str(value)
+    return f"chunk:{value}"
 
 
 def format_eids(rows, limit=80):
@@ -581,8 +686,10 @@ def run_probe(xml_path):
     driver = detect_driver(xml_path)
     if driver == "D3D11":
         script = Path(__file__).with_name("d3d11_texture_xml_probe.py")
-    else:
+    elif driver == "Vulkan":
         script = Path(__file__).with_name("mobile_texture_xml_probe.py")
+    else:
+        raise ValueError(f"Offline XML parsing is unavailable for {driver}; compatible replay is required")
     print(f"      Driver: {driver or 'unknown'}; parser: {script.name}", flush=True)
     subprocess.run([sys.executable, str(script), str(xml_path)], check=True)
     json_path = xml_path.with_name(xml_path.stem + "_texture_probe.json")
@@ -683,7 +790,10 @@ def write_csvs(data, stem, out_dir):
             {
                 "category_second_field": category,
                 "draw_calls": len(group),
-                "total_vertices": total_vertex_count(group),
+                "total_submitted": total_vertex_count(group),
+                "unknown_geometry_draws": sum(draw_vertex_count(r) is None for r in group),
+                "unique_vertex_references": sum(r.get("unique_vertex_references") or 0 for r in group),
+                "unknown_unique_draws": sum(r.get("unique_vertex_references") is None for r in group),
                 "d_indexed_draws": sum(1 for r in group if r.get("index_is_d_texture")),
                 "textured_draws": sum(1 for r in group if r.get("texture_count")),
                 "renderpasses": "; ".join(f"{k}:{v}" for k, v in rp_counter.most_common()),
@@ -700,7 +810,10 @@ def write_csvs(data, stem, out_dir):
             fieldnames=[
                 "category_second_field",
                 "draw_calls",
-                "total_vertices",
+                "total_submitted",
+                "unknown_geometry_draws",
+                "unique_vertex_references",
+                "unknown_unique_draws",
                 "d_indexed_draws",
                 "textured_draws",
                 "renderpasses",
@@ -721,7 +834,9 @@ def write_csvs(data, stem, out_dir):
                 "chunk_index",
                 "renderpass",
                 "command",
-                "vertices",
+                "submitted_elements",
+                "unique_vertex_references",
+                "geometry_status",
                 "index_count",
                 "vertex_count",
                 "instance_count",
@@ -744,7 +859,9 @@ def write_csvs(data, stem, out_dir):
                     "chunk_index": r.get("chunk_index"),
                     "renderpass": r.get("renderpass"),
                     "command": r.get("command"),
-                    "vertices": draw_vertex_count(r),
+                    "submitted_elements": draw_vertex_count(r),
+                    "unique_vertex_references": r.get("unique_vertex_references"),
+                    "geometry_status": r.get("geometry_status"),
                     "index_count": r.get("index_count"),
                     "vertex_count": r.get("vertex_count"),
                     "instance_count": r.get("instance_count"),
@@ -780,21 +897,22 @@ def html_texture_list(textures, limit=18):
 
 def html_draw_detail_row(row):
     vertices = draw_vertex_count(row)
-    idx_or_vert = row.get("index_count") or row.get("vertex_count") or 0
+    idx_or_vert = row.get("index_count") if row.get("indexed") else row.get("vertex_count")
     mesh_name = row.get("mesh_name") or "-"
     return (
         "<tr>"
         f"<td><code>{html.escape(str(row.get('index_texture') or '-'))}</code></td>"
         f"<td><code>{html.escape(str(mesh_name))}</code></td>"
-        f"<td class='num'>{vertices:,}</td>"
+        f"<td class='num'>{count_text(row.get('unique_vertex_references'))}</td>"
+        f"<td class='num'>{count_text(vertices)}</td>"
         f"<td class='num'>{row.get('draw_index')}</td>"
         f"<td>{html_texture_list(row.get('textures') or [])}</td>"
         f"<td class='num'>{row.get('texture_count')}</td>"
         f"<td class='num'>{html.escape(eid_value(row))}</td>"
         f"<td>{html.escape(str(row.get('renderpass') or ''))}</td>"
         f"<td><code>{html.escape(str(row.get('command') or ''))}</code></td>"
-        f"<td class='num'>{idx_or_vert}</td>"
-        f"<td class='num'>{row.get('instance_count')}</td>"
+        f"<td class='num'>{count_text(idx_or_vert)}</td>"
+        f"<td class='num'>{count_text(row.get('instance_count'))}</td>"
         "</tr>"
     )
 
@@ -803,7 +921,7 @@ def html_draw_detail_header(eid_label="EID/chunkIndex"):
     return f"""
                 <thead>
                   <tr>
-                    <th>Index texture</th><th>Mesh</th><th>Vertices</th><th>Draw #</th>
+                    <th>Index texture</th><th>Mesh</th><th>Unique Vertex Index</th><th>Vertex Index</th><th>Draw #</th>
                     <th>Textures</th><th>Texture count</th><th>{html.escape(eid_label)}</th>
                     <th>RenderPass/Marker</th><th>Cmd</th><th>idx/verts</th><th>inst</th>
                   </tr>
@@ -819,7 +937,8 @@ def html_texture_aggregate_row(texture, group, eid_label="EID/chunkIndex"):
         "<tr>"
         f"<td><code>{html.escape(str(texture or '-'))}</code></td>"
         f"<td class='num' data-value='{len(group)}'>{len(group)}</td>"
-        f"<td class='num' data-value='{total_vertex_count(group)}'>{total_vertex_count(group):,}</td>"
+        f"<td class='num' data-value='{sum(r.get('unique_vertex_references') or 0 for r in group)}'>{geometry_total_text(group, unique=True)}</td>"
+        f"<td class='num' data-value='{total_vertex_count(group)}'>{geometry_total_text(group)}</td>"
         f"<td>{html_eids(group, eid_label)}</td>"
         f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in meshes))}</td>"
         f"<td>{html.escape('; '.join(f'{k}:{v}' for k, v in renderpasses))}</td>"
@@ -834,7 +953,8 @@ def html_texture_aggregate_header(eid_label="EID/chunkIndex"):
                   <tr>
                     <th data-sort="text">Index texture</th>
                     <th data-sort="number">Draws</th>
-                    <th data-sort="number">Total vertices</th>
+                    <th data-sort="number">Unique Vertex Index</th>
+                    <th data-sort="number">Vertex Index</th>
                     <th>{html.escape(eid_label)}</th>
                     <th data-sort="text">Meshes</th>
                     <th data-sort="text">Top renderpasses</th>
@@ -847,6 +967,13 @@ def html_texture_aggregate_header(eid_label="EID/chunkIndex"):
 def write_html_report(stem, out_dir, source_path, data, by_category):
     html_path = out_dir / f"{stem}_analysis.html"
     rows = data.get("draws", [])
+    offline = data.get("analysis_mode") != "official_replay"
+    count_label = "Recorded draw commands" if offline else "Draw calls"
+    accuracy_note = (
+        "Offline: EID unavailable. Counts describe recorded commands; repeated submissions and multi-draw execution counts are not verified. "
+        + str(data.get("replay_error") or "").split("\n", 1)[0]
+        if offline else "Official replay: EIDs and draw parameters come from RenderDoc's action tree."
+    )
     enhanced_rows = data.get("enhanced_draws", [])
     dispatches = data.get("dispatches", [])
     command_counts = Counter(data.get("command_counts", {}))
@@ -870,7 +997,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
         eid_card_label = "Estimated EID mapped draws"
         eid_card_value = estimated_mapped
     else:
-        eid_label = "chunkIndex"
+        eid_label = "chunkIndex (EID unavailable)"
         eid_source = str(event_meta.get("source") or estimated_meta.get("source") or "fallback_chunkIndex")
         eid_card_label = "EID mapped draws"
         eid_card_value = 0
@@ -883,7 +1010,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
             "<tr>"
             f"<td><a href='#{html.escape(category)}'>{html.escape(category)}</a></td>"
             f"<td class='num'>{len(group)}</td>"
-            f"<td class='num'>{total_vertex_count(group):,}</td>"
+            f"<td class='num'>{geometry_total_text(group)}</td>"
             f"<td class='num'>{sum(1 for r in group if r.get('texture_count'))}</td>"
             f"<td class='num'>{sum(1 for r in group if r.get('index_is_d_texture'))}</td>"
             f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in top_idx))}</td>"
@@ -914,7 +1041,8 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                   <summary>
                     <span class="cat">{html.escape(category)}</span>
                     <span>{len(group)} draw calls</span>
-                    <span>{total_vertex_count(group):,} vertices</span>
+                    <span>{geometry_total_text(group, unique=True)} Unique Vertex Index</span>
+                    <span>{geometry_total_text(group)} Vertex Index</span>
                     <span>{sum(1 for r in group if r.get('texture_count'))} textured</span>
                     <span>{sum(1 for r in group if r.get('index_is_d_texture'))} _D indexed</span>
                   </summary>
@@ -946,7 +1074,8 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                     "<tr>"
                     f"<td><code>{html.escape(str(texture or '-'))}</code></td>"
                     f"<td class='num'>{len(texture_group)}</td>"
-                    f"<td class='num'>{total_vertex_count(texture_group):,}</td>"
+                    f"<td class='num'>{geometry_total_text(texture_group, unique=True)}</td>"
+                    f"<td class='num'>{geometry_total_text(texture_group)}</td>"
                     f"<td>{html_folded_values([eid_value(r) for r in sorted(texture_group, key=lambda r: r.get('draw_index') or 0)], eid_label)}</td>"
                     f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in Counter(renderpass_label(r) for r in texture_group).most_common(3)))}</td>"
                     "</tr>"
@@ -957,7 +1086,8 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                   <summary>
                     <span class="cat">{html.escape(category)}</span>
                     <span>{len(group)} draw calls</span>
-                    <span>{total_vertex_count(group):,} vertices</span>
+                    <span>{geometry_total_text(group, unique=True)} Unique Vertex Index</span>
+                    <span>{geometry_total_text(group)} Vertex Index</span>
                     <span>{sum(1 for r in group if r.get('texture_count'))} textured</span>
                     <span>{sum(1 for r in group if r.get('index_is_d_texture'))} _D indexed</span>
                     <span>{len(texture_rows_for_category)} textures</span>
@@ -966,7 +1096,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                   <table class="pass-texture-table">
                     <thead>
                       <tr>
-                        <th>Index texture</th><th>Draws</th><th>Total vertices</th>
+                        <th>Index texture</th><th>Draws</th><th>Unique Vertex Index</th><th>Vertex Index</th>
                         <th>{html.escape(eid_label)}</th><th>Marker paths</th>
                       </tr>
                     </thead>
@@ -981,7 +1111,8 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
               <summary>
                 <span class="cat">{html.escape(pass_name)}</span>
                 <span>{len(pass_group)} draw calls</span>
-                <span>{total_vertex_count(pass_group):,} vertices</span>
+                <span>{geometry_total_text(pass_group, unique=True)} Unique Vertex Index</span>
+                <span>{geometry_total_text(pass_group)} Vertex Index</span>
                 <span>{sum(1 for r in pass_group if r.get('texture_count'))} textured</span>
               </summary>
               <div class="pass-subgroups">{''.join(pass_category_blocks)}</div>
@@ -999,7 +1130,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
             f"<td><code>{html.escape(str(tex))}</code></td>"
             f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in categories))}</td>"
             f"<td class='num'>{len(group)}</td>"
-            f"<td class='num'>{total_vertex_count(group):,}</td>"
+            f"<td class='num'>{geometry_total_text(group)}</td>"
             f"<td><code>{html.escape(format_eids(group))}</code></td>"
             f"<td>{html.escape('; '.join(f'{k}:{v}' for k, v in renderpasses))}</td>"
             f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in meshes))}</td>"
@@ -1018,7 +1149,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                 "<tr>"
                 f"<td>{html.escape(category)}</td>"
                 f"<td class='num'>{len(group)}</td>"
-                f"<td class='num'>{total_vertex_count(group):,}</td>"
+                f"<td class='num'>{geometry_total_text(group)}</td>"
                 f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in top_idx))}</td>"
                 f"<td>{html.escape('; '.join(f'{k}:{v}' for k, v in renderpasses))}</td>"
                 f"<td><code>{html.escape(format_eids(group))}</code></td>"
@@ -1035,7 +1166,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
             f"<td><code>{html.escape(str(tex))}</code></td>"
             f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in categories))}</td>"
             f"<td class='num'>{len(group)}</td>"
-            f"<td class='num'>{total_vertex_count(group):,}</td>"
+            f"<td class='num'>{geometry_total_text(group)}</td>"
             f"<td><code>{html.escape(format_eids(group))}</code></td>"
             f"<td>{html.escape('; '.join(f'{k}:{v}' for k, v in renderpasses))}</td>"
             f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in meshes))}</td>"
@@ -1049,7 +1180,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
     <table>
       <thead>
         <tr>
-          <th>Texture category</th><th>Draws</th><th>Total vertices</th>
+          <th>Texture category</th><th>Draws</th><th>Vertex Index</th>
           <th>Top index textures</th><th>Top renderpasses</th><th>EID</th>
         </tr>
       </thead>
@@ -1061,7 +1192,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
       <table>
         <thead>
           <tr>
-            <th>Index texture</th><th>Categories</th><th>Draws</th><th>Total vertices</th>
+            <th>Index texture</th><th>Categories</th><th>Draws</th><th>Vertex Index</th>
             <th>EID</th><th>Top renderpasses</th><th>Top meshes</th>
           </tr>
         </thead>
@@ -1086,6 +1217,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
     header {{ padding:20px 28px 14px; background:#101828; color:white; }}
     h1 {{ margin:0 0 8px; font-size:22px; font-weight:650; }}
     .meta {{ color:#d0d5dd; overflow-wrap:anywhere; }}
+    main > .meta {{ color:var(--muted); }}
     main {{ padding:22px 28px 40px; }}
     .cards {{ display:grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap:12px; margin-bottom:18px; }}
     .card {{ background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:12px; }}
@@ -1101,20 +1233,21 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
     a {{ color:var(--accent); text-decoration:none; }}
     details.eids > summary {{ cursor:pointer; color:#0b4aa2; }}
     details.eids div {{ margin-top:6px; max-width:820px; overflow-wrap:anywhere; }}
-    details.category {{ background:var(--panel); border:1px solid var(--border); border-radius:8px; margin:10px 0; overflow:hidden; }}
-    details.category > summary {{ cursor:pointer; display:flex; gap:14px; align-items:center; padding:10px 12px; background:#eef2f7; font-weight:600; }}
-    details.pass-group > summary {{ display:grid; grid-template-columns:minmax(320px, 430px) repeat(3, max-content); column-gap:28px; row-gap:6px; padding:14px 18px; }}
+    details.category {{ background:var(--panel); border:1px solid var(--border); border-radius:8px; margin:10px 0; overflow-x:auto; }}
+    details.category > summary {{ cursor:pointer; display:flex; flex-wrap:wrap; gap:14px; align-items:center; padding:10px 12px; background:#eef2f7; font-weight:600; }}
+    details.pass-group > summary {{ display:grid; grid-template-columns:minmax(280px, 400px) repeat(4, max-content); column-gap:20px; row-gap:6px; padding:14px 18px; }}
     details.pass-group > summary .cat {{ min-width:0; overflow-wrap:anywhere; }}
     .pass-subgroups {{ padding:10px 12px 14px; }}
-    details.pass-subgroup {{ border:1px solid var(--border); border-radius:8px; margin:8px 0; overflow:hidden; background:#fff; }}
-    details.pass-subgroup > summary {{ cursor:pointer; display:grid; grid-template-columns:minmax(150px, 260px) repeat(5, max-content); column-gap:18px; row-gap:6px; align-items:center; padding:9px 10px; background:#f8fafc; font-weight:600; }}
+    details.pass-subgroup {{ border:1px solid var(--border); border-radius:8px; margin:8px 0; overflow-x:auto; background:#fff; }}
+    details.pass-subgroup > summary {{ cursor:pointer; display:flex; flex-wrap:wrap; gap:8px 18px; align-items:center; padding:9px 10px; background:#f8fafc; font-weight:600; }}
+    details.pass-subgroup > summary .cat {{ flex-basis:180px; }}
     details.pass-subgroup > summary .cat {{ min-width:0; overflow-wrap:anywhere; }}
     .marker-paths {{ padding:8px 10px 0; color:var(--muted); font-size:12px; overflow-wrap:anywhere; }}
     .pass-texture-table {{ margin:8px 0 0; border-left:0; border-right:0; border-bottom:0; }}
     .pass-texture-table th:nth-child(1) {{ min-width:260px; }}
-    .pass-texture-table th:nth-child(4) {{ min-width:120px; }}
-    .pass-texture-table th:nth-child(5) {{ min-width:260px; }}
-    details.section {{ background:var(--panel); border:1px solid var(--border); border-radius:8px; margin:18px 0; overflow:hidden; }}
+    .pass-texture-table th:nth-child(5) {{ min-width:120px; }}
+    .pass-texture-table th:nth-child(6) {{ min-width:260px; }}
+    details.section {{ background:var(--panel); border:1px solid var(--border); border-radius:8px; margin:18px 0; overflow-x:auto; }}
     details.section > summary {{ cursor:pointer; padding:10px 12px; background:#eef2f7; font-size:18px; font-weight:650; }}
     details.section > table {{ margin:0; border-left:0; border-right:0; border-bottom:0; }}
     summary .cat {{ min-width:210px; color:#0b4aa2; }}
@@ -1124,6 +1257,18 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
     .pill {{ display:inline-block; margin:0 6px 6px 0; padding:3px 7px; border:1px solid var(--border); border-radius:999px; background:#fafafa; }}
     .muted {{ color:var(--muted); }}
     .section-title {{ margin:22px 0 8px; font-size:18px; }}
+    @media (max-width:1200px) {{
+      details.pass-group > summary {{ display:flex; flex-wrap:wrap; gap:8px 18px; }}
+      details.pass-group > summary .cat {{ flex-basis:100%; }}
+    }}
+    @media (max-width:600px) {{
+      header, main {{ padding:16px; }}
+      h1 {{ overflow-wrap:anywhere; }}
+      .cards {{ grid-template-columns:repeat(2, minmax(0,1fr)); }}
+      .card {{ overflow-wrap:anywhere; }}
+      summary .cat {{ min-width:0; flex-basis:100%; overflow-wrap:anywhere; }}
+      details.pass-subgroup > summary .cat {{ flex-basis:100%; }}
+    }}
   </style>
 </head>
 <body>
@@ -1133,7 +1278,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
   </header>
   <main>
     <div class="cards">
-      <div class="card">Draw calls<b>{len(rows)}</b></div>
+      <div class="card">{count_label}<b>{len(rows)}</b></div>
       <div class="card">Dispatches<b>{len(dispatches)}</b></div>
       <div class="card">Textured draws<b>{textured}</b></div>
       <div class="card">_D indexed draws<b>{d_indexed}</b></div>
@@ -1142,6 +1287,11 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
       <div class="card">Merged enhanced draws<b>{enhanced_merged}</b></div>
       <div class="card">{html.escape(eid_card_label)}<b>{eid_card_value}</b><span class="muted">{html.escape(eid_source)}</span></div>
     </div>
+
+    <p class="meta">{html.escape(accuracy_note)}</p>
+    <p class="meta">Unique Vertex Index：每个 Draw 内对引用的顶点索引去重，乘以实例数后累加；非索引绘制直接使用顶点数。
+    Vertex Index：索引绘制使用索引数，非索引绘制使用顶点数，再乘以实例数，包含重复引用。
+    Unique Vertex Index 不是整个场景的去重模型顶点数，也不是 GPU 实际执行的 VS 次数。无法读取的数据标为未知，汇总会注明缺失数量。</p>
 
     <h2 class="section-title">RenderPass/Marker Major Groups</h2>
     {''.join(pass_blocks)}
@@ -1154,7 +1304,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
       <table>
         <thead>
           <tr>
-            <th>Index texture</th><th>Categories</th><th>Draws</th><th>Total vertices</th>
+            <th>Index texture</th><th>Categories</th><th>Draws</th><th>Vertex Index</th>
             <th>{html.escape(eid_label)}</th><th>Top renderpasses</th><th>Top meshes</th>
           </tr>
         </thead>
@@ -1167,7 +1317,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
     <details class="section">
       <summary>Texture Category Summary</summary>
       <table>
-        <thead><tr><th>Category(second field)</th><th>Draws</th><th>Total vertices</th><th>Textured</th><th>_D indexed</th><th>Top index textures</th><th>Top renderpasses</th></tr></thead>
+        <thead><tr><th>Category(second field)</th><th>Draws</th><th>Vertex Index</th><th>Textured</th><th>_D indexed</th><th>Top index textures</th><th>Top renderpasses</th></tr></thead>
         <tbody>{''.join(summary_rows)}</tbody>
       </table>
     </details>
@@ -1205,6 +1355,9 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
   </script>
 </body>
 </html>"""
+    if offline:
+        doc = doc.replace(" draw calls</span>", " recorded commands</span>")
+        doc = doc.replace(">Draws</th>", ">Commands</th>")
     html_path.write_text(doc, encoding="utf-8")
     return html_path
 
@@ -1215,14 +1368,14 @@ def write_category_detail_md(stem, out_dir, by_category):
         f"# {stem} texture category details",
         "",
         "## Category Summary",
-        "| Category(second field) | DrawCalls | Total vertices | Textured | `_D` indexed | Top index textures |",
+        "| Category(second field) | DrawCalls | Vertex Index | Textured | `_D` indexed | Top index textures |",
         "|---|---:|---:|---:|---:|---|",
     ]
     ordered = sorted(by_category.items(), key=category_sort_key)
     for category, group in ordered:
         top_idx = Counter(r.get("index_texture") or "-" for r in group).most_common(5)
         lines.append(
-            f"| `{category}` | {len(group)} | {total_vertex_count(group)} | {sum(1 for r in group if r.get('texture_count'))} | "
+            f"| `{category}` | {len(group)} | {geometry_total_text(group)} | {sum(1 for r in group if r.get('texture_count'))} | "
             f"{sum(1 for r in group if r.get('index_is_d_texture'))} | "
             f"{'; '.join(f'`{k}` ({v})' for k, v in top_idx)} |"
         )
@@ -1233,20 +1386,21 @@ def write_category_detail_md(stem, out_dir, by_category):
             f"## {category}",
             "",
             f"- DrawCall: {len(group)}",
-            f"- Total vertices: {total_vertex_count(group)}",
+            f"- Vertex Index: {geometry_total_text(group)}",
+            f"- Unique Vertex Index: {geometry_total_text(group, unique=True)}",
             f"- Textured: {sum(1 for r in group if r.get('texture_count'))}",
             f"- `_D` indexed: {sum(1 for r in group if r.get('index_is_d_texture'))}",
             "",
-            "| Index texture | Mesh | Vertices | Draw # | Textures | Texture count | EID | estimated EID | chunkIndex | RenderPass | Cmd | idx/verts | inst |",
+            "| Index texture | Mesh | Vertex Index | Draw # | Textures | Texture count | EID | Unique Vertex Index | chunkIndex | RenderPass | Cmd | idx/verts | inst |",
             "|---|---|---:|---:|---|---:|---:|---:|---:|---|---|---:|---:|",
         ]
         for r in group:
-            idx_or_vert = r.get("index_count") or r.get("vertex_count") or 0
+            idx_or_vert = r.get("index_count") if r.get("indexed") else r.get("vertex_count")
             lines.append(
-                f"| `{r.get('index_texture')}` | `{r.get('mesh_name')}` | {draw_vertex_count(r)} | {r.get('draw_index')} | "
+                f"| `{r.get('index_texture')}` | `{r.get('mesh_name')}` | {count_text(draw_vertex_count(r))} | {r.get('draw_index')} | "
                 f"{md_texture_list(r.get('textures') or [])} | {r.get('texture_count')} | "
-                f"{r.get('event_id') or '-'} | {r.get('estimated_event_id') or '-'} | {r.get('chunk_index')} | {r.get('renderpass')} | `{r.get('command')}` | "
-                f"{idx_or_vert} | {r.get('instance_count')} |"
+                f"{r.get('event_id') or '-'} | {count_text(r.get('unique_vertex_references'))} | {r.get('chunk_index')} | {r.get('renderpass')} | `{r.get('command')}` | "
+                f"{count_text(idx_or_vert)} | {count_text(r.get('instance_count'))} |"
             )
 
     md_path.write_text("\n".join(lines), encoding="utf-8")
@@ -1279,6 +1433,7 @@ def main():
     parser.add_argument("--renderdoccmd", help="Path to renderdoccmd.exe")
     parser.add_argument("--force-convert", action="store_true", help="Regenerate XML even if it exists")
     parser.add_argument("--keep-intermediate", action="store_true", help="Keep XML/JSON/CSV/MD helper files")
+    parser.add_argument("--offline", action="store_true", help="Skip GPU replay; EIDs and indirect geometry remain unknown")
     args = parser.parse_args()
 
     raw = args.capture or input("Drag/paste .rdc path: ")
@@ -1295,60 +1450,41 @@ def main():
     renderdoccmd = find_renderdoccmd(args.renderdoccmd)
     print(f"RenderDoc command: {renderdoccmd}")
 
-    if source_path.suffix.lower() == ".rdc":
+    data = None
+    replay_error = "Replay skipped (--offline or XML input)"
+    probe_json = probe_md = replay_csv = None
+    xml_path = source_path if source_path.suffix.lower() == ".xml" else out_dir / f"{source_path.stem}.xml"
+    if source_path.suffix.lower() == ".rdc" and not args.offline:
+        print("[1/4] Export official RenderDoc actions and per-event geometry", flush=True)
+        replay_csv = out_dir / f"{source_path.stem}_official_actions.csv"
+        ok, replay_error = run_replay_export(source_path, replay_csv)
+        if ok:
+            data = data_from_replay_export(replay_csv)
+            print(f"[2/4] Official replay: {len(data['draws'])} draws, "
+                  f"{len(data['dispatches'])} dispatches", flush=True)
+        else:
+            print(f"Official replay unavailable: {replay_error}", flush=True)
+
+    if data is None and source_path.suffix.lower() == ".rdc":
         xml_path = out_dir / f"{source_path.stem}.xml"
         print(f"[1/4] Convert RDC to XML: {xml_path}", flush=True)
         run_convert(renderdoccmd, source_path, xml_path, args.force_convert)
     elif source_path.suffix.lower() == ".xml":
         xml_path = source_path
-    else:
+    elif source_path.suffix.lower() != ".rdc":
         raise SystemExit("Input must be .rdc or .xml")
 
-    driver = detect_driver(xml_path)
-    rows_path = find_precomputed_rows(source_path, out_dir)
-    if driver == "D3D11" and rows_path is not None:
-        print("[2/4] Parse full D3D11 draw calls from XML", flush=True)
-        probe_json, probe_md = run_probe(xml_path)
-        data = json.loads(probe_json.read_text(encoding="utf-8"))
-        print(f"      Load enhanced pipeline rows: {rows_path}", flush=True)
-        data["enhanced_draws"] = data_from_precomputed_rows(rows_path)["draws"]
-        merged = merge_enhanced_rows(data, data["enhanced_draws"])
-        data["enhanced_merged_draws"] = merged
-        print(f"      Merged enhanced rows into full XML draws: {merged}/{len(data['enhanced_draws'])}", flush=True)
-        data["enhanced_source"] = str(rows_path)
-    else:
+    if data is None:
         print("[2/4] Parse draw calls and texture bindings", flush=True)
         probe_json, probe_md = run_probe(xml_path)
         data = json.loads(probe_json.read_text(encoding="utf-8"))
-
-    official_mapped = 0
-    if source_path.suffix.lower() == ".rdc":
-        actionmap_csv = out_dir / f"{source_path.stem}_renderdoc_actionmap.csv"
-        print("      Try RenderDoc official actionmap EID export", flush=True)
-        ok, message = run_actionmap(renderdoccmd, source_path, actionmap_csv, args.force_convert)
-        if ok:
-            official_map, official_meta = load_official_actionmap(actionmap_csv)
-            official_meta["path"] = str(actionmap_csv)
-            official_mapped = apply_event_id_map(data, official_map, official_meta, "event_id")
-            print(
-                f"      Official EID map: mapped {official_mapped}/{len(data.get('draws', []))} draws; "
-                f"max EID {official_meta.get('max_event_id', 0)}",
-                flush=True,
-            )
-        else:
-            data["event_id_map"] = {"source": "renderdoc_actionmap_unavailable", "message": message}
-            data["event_id_mapped_draws"] = 0
-            print(f"      Official actionmap unavailable: {message}", flush=True)
-
-    if official_mapped == 0:
-        print("      Build estimated offline EID map", flush=True)
-        event_map, event_meta = build_event_id_map(xml_path, driver)
-        mapped_draws = apply_event_id_map(data, event_map, event_meta, "estimated_event_id")
-        print(
-            f"      Estimated EID map: {event_meta.get('source')} mapped {mapped_draws}/{len(data.get('draws', []))} draws; "
-            f"max estimated EID {event_meta.get('max_event_id', 0)}",
-            flush=True,
-        )
+        rows_path = find_precomputed_rows(source_path, out_dir)
+        if detect_driver(xml_path) == "D3D11" and rows_path is not None:
+            data["enhanced_draws"] = data_from_precomputed_rows(rows_path)["draws"]
+            data["enhanced_merged_draws"] = merge_enhanced_rows(data, data["enhanced_draws"])
+        prepare_offline_rows(data)
+        data["replay_error"] = replay_error
+        print("      Offline command counts only. Official EID unavailable; showing chunkIndex.", flush=True)
 
     print("[3/4] Write HTML report", flush=True)
     by_category = build_category_groups(data)
@@ -1356,11 +1492,13 @@ def main():
 
     print("[4/4] Cleanup", flush=True)
     if args.keep_intermediate:
+        probe_json = out_dir / f"{source_path.stem}_analysis_data.json"
+        probe_json.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         summary_csv, detail_csv, by_category = write_csvs(data, source_path.stem, out_dir)
         detail_md = write_category_detail_md(source_path.stem, out_dir, by_category)
         write_index_md(source_path.stem, out_dir, source_path, xml_path, probe_md, probe_json, summary_csv, detail_csv, detail_md, html_report)
     else:
-        for path in (probe_md, probe_json):
+        for path in (probe_md, probe_json, replay_csv):
             if path is None:
                 continue
             try:

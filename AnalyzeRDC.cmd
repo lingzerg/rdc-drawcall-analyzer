@@ -102,7 +102,7 @@ if "%CAPTURE%"=="" (
 )
 
 set "CAPTURE=%CAPTURE:"=%"
-"%PY%" "%SCRIPT%" "%CAPTURE%" %RD_ARG%
+"%PY%" "%SCRIPT%" "%CAPTURE%"
 set "EXIT_CODE=%ERRORLEVEL%"
 
 echo.

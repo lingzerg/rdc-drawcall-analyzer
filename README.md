@@ -1,6 +1,21 @@
 # RenderDoc RDC DrawCall 分析工具
 
-这是一个离线分析 RenderDoc `.rdc` 截帧的工具，用来统计 DrawCall 构成，并按纹理名第二字段做分类汇总。默认输出一个可展开的 HTML 页面。
+这是一个分析 RenderDoc `.rdc` 截帧的工具，用来统计 DrawCall 构成，并按纹理名第二字段做分类汇总。默认输出一个可展开的 HTML 页面。优先使用 RenderDoc 官方无界面回放；硬件不兼容时回退到离线命令分析。
+
+## EID 与顶点统计准确性
+
+- `AnalyzeRDC.cmd` 自动调用内置的 `rdc_replay_export.exe`，无需打开 RenderDoc 窗口，也无需安装编译器。
+- 回放成功时，以 `GetRootActions()` 的实际绘制动作作为主表，直接读取官方 EID、索引/顶点数和实例数；同一 chunk 的多次执行保留为不同的 EID。多重绘制的父节点不重复计数。
+- 纹理和 Mesh 名从每个 EID 的管线状态读取，分类继续优先选择 `_D` 纹理，保留 HLOD / PCG HLOD 特殊分类。
+- `Unique Vertex Index`（原 `Unique refs`）是每次绘制引用的不同顶点索引数量，乘以实例数后按分类累加。读取索引时使用当前 EID 的缓冲区、绑定偏移、首索引和索引宽度，并排除 primitive restart。它不是场景整体去重顶点数，也不是 GPU 实际执行的 VS 次数。页面优先显示此项。
+- `Vertex Index`（原 `Submitted`）是每次绘制的索引数（索引绘制）或顶点数（非索引绘制），乘以有效实例数，包含重复引用。普通 Draw 的实例数按 1 处理，实例化 Draw 的 0 实例则保留为 0。
+- 索引数据读取不完整或单次读取超过 64 MiB 时，Unique Vertex Index 显示 `Unknown`。汇总同时显示未知项数量，不将未知值作为完整的 0。
+- 回放失败时仍可分析 XML 纹理分类，但显示的是录制的绘制命令数，不保证等于实际执行次数。此时不再推算 EID，显示 `chunk:编号`；间接绘制的几何数量标为未知。
+- 无界面回放仍需要兼容的 GPU/驱动。手机 Vulkan 的 ASTC 扩展不兼容无法通过命令行绕过。
+
+排查时加 `--keep-intermediate` 可保留官方动作 CSV 和归一化 JSON。`--offline` 可直接跳过回放。官方 CSV 中 `numInstances` 是未经修改的 API 原值；归一化 JSON 中 `instance_count` 是结合 Instanced 标志计算后的有效实例数。
+
+开发者可运行 `native\BuildExporter.cmd -RenderDocSource D:\workspace\renderdoc` 重新编译导出器，需要 Visual Studio C++ 工具。构建脚本自动选用与内置 DLL 提交版本完全一致的头文件，运行时也会校验版本。
 
 ## 仓库包含什么
 
@@ -12,7 +27,7 @@
 - `AnalyzeMobileRDC.cmd`：移动端截帧入口，本质上调用同一个自动分析器。
 - `AnalyzePCRDC.cmd`：PC 截帧入口，本质上调用同一个自动分析器。
 - `runtime/python`：内置 Python 运行时。
-- `third_party/renderdoc`：最小 RenderDoc 命令行运行集，用于 `renderdoccmd convert`。
+- `third_party/renderdoc`：RenderDoc 命令行运行集，包含官方回放导出器和离线转换工具。
 - `analyzer`：分析脚本，包含 Vulkan/mobile 和 D3D11/PC 两条解析路径。
 
 启动时 `AnalyzeRDC.cmd` 会检查这些运行时是否存在：
@@ -42,7 +57,7 @@ AnalyzeRDC.cmd
 analysis_results/<截帧文件名>/<截帧文件名>_analysis.html
 ```
 
-默认只保留这一个 HTML 文件。打开 HTML 后：
+默认保留 HTML 和 `analysis.log` 日志。打开 HTML 后：
 
 - 最上方是每个分类的可展开明细。
 - 点击分类可以展开该分类下的 DrawCall。

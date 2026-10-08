@@ -11,6 +11,8 @@ DRAW_NAMES = {
     "ID3D11DeviceContext::DrawInstanced",
     "ID3D11DeviceContext::DrawIndexedInstanced",
     "ID3D11DeviceContext::DrawAuto",
+    "ID3D11DeviceContext::DrawInstancedIndirect",
+    "ID3D11DeviceContext::DrawIndexedInstancedIndirect",
 }
 DISPATCH_NAMES = {"ID3D11DeviceContext::Dispatch", "ID3D11DeviceContext::DispatchIndirect"}
 SRV_SET_NAMES = {
@@ -299,7 +301,7 @@ def main():
                         or uint_value(chunk, "vertexCount")
                         or uint_value(chunk, "VertexCountPerInstance")
                     ),
-                    "instance_count": uint_value(chunk, "InstanceCount", 1) or uint_value(chunk, "instanceCount", 1),
+                    "instance_count": uint_value(chunk, "InstanceCount", uint_value(chunk, "instanceCount", 1)),
                     "descriptor_sets": bound_views,
                     "texture_count": len(tex_unique),
                     "mesh_name": mesh_name,
