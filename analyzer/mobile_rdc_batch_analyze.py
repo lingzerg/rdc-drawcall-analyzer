@@ -1289,9 +1289,8 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
     </div>
 
     <p class="meta">{html.escape(accuracy_note)}</p>
-    <p class="meta">Unique Vertex Index：每个 Draw 内对引用的顶点索引去重，乘以实例数后累加；非索引绘制直接使用顶点数。
-    Vertex Index：索引绘制使用索引数，非索引绘制使用顶点数，再乘以实例数，包含重复引用。
-    Unique Vertex Index 不是整个场景的去重模型顶点数，也不是 GPU 实际执行的 VS 次数。无法读取的数据标为未知，汇总会注明缺失数量。</p>
+    <p class="meta">Vertex Index / 3 = 三角形数量（Triangle List）。<br>
+    Unique Vertex Index = 实际引用的顶点数量（逐 Draw 去重，计入实例数后累加）。</p>
 
     <h2 class="section-title">RenderPass/Marker Major Groups</h2>
     {''.join(pass_blocks)}
