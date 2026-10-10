@@ -13,7 +13,9 @@ static void checked(VkResult r, int line) { if(r != VK_SUCCESS) { std::fprintf(s
 
 int main(int argc, char **argv)
 {
-  if(argc != 3) return 2;
+  if(argc != 3 && argc != 4) return 2;
+  const bool cpuWrite = argc == 4 && std::strcmp(argv[3], "cpu") == 0;
+  const bool restart = argc == 4 && std::strcmp(argv[3], "restart") == 0;
   HMODULE rd = LoadLibraryA(argv[1]);
   auto getAPI = (pRENDERDOC_GetAPI)GetProcAddress(rd, "RENDERDOC_GetAPI");
   RENDERDOC_API_1_6_0 *api = nullptr;
@@ -107,6 +109,7 @@ int main(int argc, char **argv)
   VkPipelineVertexInputStateCreateInfo vi = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
   VkPipelineInputAssemblyStateCreateInfo ia = {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
   ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  if(restart) { ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; ia.primitiveRestartEnable = VK_TRUE; }
   VkPipelineRasterizationStateCreateInfo rs = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
   rs.rasterizerDiscardEnable = VK_TRUE; rs.lineWidth = 1;
   VkGraphicsPipelineCreateInfo gp = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
@@ -140,8 +143,9 @@ int main(int argc, char **argv)
   void *mapped;
   check(vkMapMemory(device, mem, 0, VK_WHOLE_SIZE, 0, &mapped));
   uint16_t values[] = {0, 1, 2, 0, 2, 3};
+  if(restart) values[3] = 0xffff;
   std::memcpy(mapped, values, sizeof(values));
-  vkUnmapMemory(device, mem);
+  if(!cpuWrite) vkUnmapMemory(device, mem);
   VkFenceCreateInfo fc = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO}; fc.flags = VK_FENCE_CREATE_SIGNALED_BIT;
   VkFence fence; check(vkCreateFence(device, &fc, nullptr, &fence));
 
@@ -189,6 +193,7 @@ int main(int argc, char **argv)
   check(vkQueueSubmit(queue, 1, submit, VK_NULL_HANDLE));
   check(vkQueueWaitIdle(queue));
   check(vkResetCommandBuffer(cb[0], 0));
+  if(cpuWrite) std::memset(mapped, 0, sizeof(values));
   check(vkBeginCommandBuffer(cb[0], &begin));
   draw(cb[0], true);
   check(vkEndCommandBuffer(cb[0]));

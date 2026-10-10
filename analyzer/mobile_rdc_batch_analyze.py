@@ -97,6 +97,16 @@ def count_text(value):
     return "Unknown" if value is None else f"{value:,}"
 
 
+def unique_vertex_tooltip(rows):
+    labels = Counter(
+        (r.get("unique_vertex_reason") or "Index data unavailable")
+        if r.get("unique_vertex_references") is None else
+        (r.get("unique_vertex_source") or "official_replay")
+        for r in rows
+    )
+    return html.escape("\n".join(f"{label}: {count} draws" for label, count in labels.items()), quote=True)
+
+
 def prepare_offline_rows(data):
     for row in data.get("draws", []):
         # XML records commands, not necessarily each execution of those commands.
@@ -112,14 +122,22 @@ def prepare_offline_rows(data):
     data["analysis_mode"] = "offline_commands"
 
 
-def reconstruct_vulkan_events(data, xml_path):
+def reconstruct_vulkan_events(data, xml_path, buffer_zip=None):
     import importlib.util
     spec = importlib.util.spec_from_file_location("vulkan_events", Path(__file__).with_name("vulkan_offline_events.py"))
     events = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(events)
     try:
-        mapping = events.reconstruct(ET.parse(xml_path).getroot())
+        root = ET.parse(xml_path).getroot()
+        mapping = events.reconstruct(root)
         events.apply_to_analysis(data, mapping)
+        geometry_spec = importlib.util.spec_from_file_location("static_indices", Path(__file__).with_name("vulkan_static_indices.py"))
+        geometry = importlib.util.module_from_spec(geometry_spec)
+        geometry_spec.loader.exec_module(geometry)
+        geometry.analyze(data, root, mapping, buffer_zip)
+        stats = data["offline_unique_vertex_index"]
+        print(f"      Offline unique indices: {stats['known_draws']} known draws, "
+              f"{stats['unknown_draws']} unknown draws", flush=True)
         return mapping
     except events.UnsupportedCapture as exc:
         data["offline_eid_error"] = str(exc)
@@ -377,8 +395,9 @@ def find_renderdoccmd(explicit=None):
     return Path("renderdoccmd.exe")
 
 
-def run_convert(renderdoccmd, rdc_path, xml_path, force=False):
-    if xml_path.exists() and not force and xml_path.stat().st_mtime >= rdc_path.stat().st_mtime:
+def run_convert(renderdoccmd, rdc_path, xml_path, force=False, include_buffers=False):
+    # A snapshot ZIP and its XML must come from the same export, never a stale pair.
+    if not include_buffers and xml_path.exists() and not force and xml_path.stat().st_mtime >= rdc_path.stat().st_mtime:
         print(f"[command] convert: use cached XML {xml_path}")
         return
     cmd = [
@@ -387,7 +406,7 @@ def run_convert(renderdoccmd, rdc_path, xml_path, force=False):
         f"--filename={rdc_path}",
         f"--output={xml_path}",
         "--input-format=rdc",
-        "--convert-format=xml",
+        "--convert-format=zip.xml" if include_buffers else "--convert-format=xml",
     ]
     result = subprocess.run(cmd, check=False, capture_output=True, text=True, errors="replace")
     print_command_result("convert", cmd, result)
@@ -852,6 +871,8 @@ def write_csvs(data, stem, out_dir):
                 "submitted_elements",
                 "unique_vertex_references",
                 "geometry_status",
+                "unique_vertex_source",
+                "unique_vertex_reason",
                 "index_count",
                 "vertex_count",
                 "instance_count",
@@ -877,6 +898,8 @@ def write_csvs(data, stem, out_dir):
                     "submitted_elements": draw_vertex_count(r),
                     "unique_vertex_references": r.get("unique_vertex_references"),
                     "geometry_status": r.get("geometry_status"),
+                    "unique_vertex_source": r.get("unique_vertex_source"),
+                    "unique_vertex_reason": r.get("unique_vertex_reason"),
                     "index_count": r.get("index_count"),
                     "vertex_count": r.get("vertex_count"),
                     "instance_count": r.get("instance_count"),
@@ -918,7 +941,7 @@ def html_draw_detail_row(row):
         "<tr>"
         f"<td><code>{html.escape(str(row.get('index_texture') or '-'))}</code></td>"
         f"<td><code>{html.escape(str(mesh_name))}</code></td>"
-        f"<td class='num'>{count_text(row.get('unique_vertex_references'))}</td>"
+        f"<td class='num' title='{unique_vertex_tooltip([row])}'>{count_text(row.get('unique_vertex_references'))}</td>"
         f"<td class='num'>{count_text(vertices)}</td>"
         f"<td class='num'>{row.get('draw_index')}</td>"
         f"<td>{html_texture_list(row.get('textures') or [])}</td>"
@@ -952,7 +975,7 @@ def html_texture_aggregate_row(texture, group, eid_label="EID/chunkIndex"):
         "<tr>"
         f"<td><code>{html.escape(str(texture or '-'))}</code></td>"
         f"<td class='num' data-value='{len(group)}'>{len(group)}</td>"
-        f"<td class='num' data-value='{sum(r.get('unique_vertex_references') or 0 for r in group)}'>{geometry_total_text(group, unique=True)}</td>"
+        f"<td class='num' title='{unique_vertex_tooltip(group)}' data-value='{sum(r.get('unique_vertex_references') or 0 for r in group)}'>{geometry_total_text(group, unique=True)}</td>"
         f"<td class='num' data-value='{total_vertex_count(group)}'>{geometry_total_text(group)}</td>"
         f"<td>{html_eids(group, eid_label)}</td>"
         f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in meshes))}</td>"
@@ -994,10 +1017,24 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
         accuracy_note = (
             "Vulkan 离线重建 EID：按命令缓冲区提交顺序编号，重复提交分别计数。"
             "未在此截帧上完成 GPU 回放，待与同版本 RenderDoc 核对。"
-            "纹理来自离线绑定解析；Unique Vertex Index 未读取索引缓冲区时仍为 Unknown。"
+            "纹理来自离线绑定解析；Unique Vertex Index 仅计算可验证的初始索引、完整 CPU 上传或非索引绘制，无法确认的保留 Unknown。"
         )
     elif offline and data.get("offline_eid_error"):
         accuracy_note += " Offline EID: " + data["offline_eid_error"]
+    unique_stats = data.get("offline_unique_vertex_index")
+    unique_note = ""
+    if unique_stats:
+        reason_items = "".join(
+            f"<li>{html.escape(reason)}: {count} draws</li>"
+            for reason, count in sorted(unique_stats["unknown_reasons"].items(), key=lambda item: -item[1])
+        )
+        unique_note = (
+            f"<details class='section'><summary>Unique Vertex Index: "
+            f"{unique_stats['known_draws']} known draws / {unique_stats['unknown_draws']} unknown draws</summary>"
+            "<p class='meta'>离线口径：初始索引和按事件顺序恢复的完整 CPU 上传按实际字节去重，计入实例数；非索引绘制使用命令参数。"
+            "潜在 GPU 写入、未完整记录的 CPU 改写、拷贝目标或数据不完整的范围不参与已知总量。</p>"
+            f"<ul>{reason_items}</ul></details>"
+        )
     enhanced_rows = data.get("enhanced_draws", [])
     dispatches = data.get("dispatches", [])
     command_counts = Counter(data.get("command_counts", {}))
@@ -1098,7 +1135,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
                     "<tr>"
                     f"<td><code>{html.escape(str(texture or '-'))}</code></td>"
                     f"<td class='num'>{len(texture_group)}</td>"
-                    f"<td class='num'>{geometry_total_text(texture_group, unique=True)}</td>"
+                    f"<td class='num' title='{unique_vertex_tooltip(texture_group)}'>{geometry_total_text(texture_group, unique=True)}</td>"
                     f"<td class='num'>{geometry_total_text(texture_group)}</td>"
                     f"<td>{html_folded_values([eid_value(r) for r in sorted(texture_group, key=lambda r: r.get('draw_index') or 0)], eid_label)}</td>"
                     f"<td>{html.escape('; '.join(f'{k} ({v})' for k, v in Counter(renderpass_label(r) for r in texture_group).most_common(3)))}</td>"
@@ -1315,6 +1352,7 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
     <p class="meta">{html.escape(accuracy_note)}</p>
     <p class="meta">Vertex Index / 3 = 三角形数量（Triangle List）。<br>
     Unique Vertex Index = 实际引用的顶点数量（逐 Draw 去重，计入实例数后累加）。</p>
+    {unique_note}
 
     <h2 class="section-title">RenderPass/Marker Major Groups</h2>
     {''.join(pass_blocks)}
@@ -1475,6 +1513,8 @@ def main():
 
     data = None
     offline_mapping = None
+    buffer_zip = None
+    generated_geometry_paths = []
     replay_error = "Replay skipped (--offline or XML input)"
     probe_json = probe_md = replay_csv = None
     xml_path = source_path if source_path.suffix.lower() == ".xml" else out_dir / f"{source_path.stem}.xml"
@@ -1499,17 +1539,33 @@ def main():
         raise SystemExit("Input must be .rdc or .xml")
 
     if data is None:
+        driver = detect_driver(xml_path)
+        if driver == "Vulkan" and source_path.suffix.lower() == ".rdc":
+            geometry_xml = out_dir / f"{source_path.stem}_geometry.zip.xml"
+            geometry_zip = geometry_xml.with_suffix("")
+            generated_geometry_paths = [geometry_xml, geometry_zip]
+            print("      Export binary snapshots for conservative offline index counts", flush=True)
+            try:
+                run_convert(renderdoccmd, source_path, geometry_xml, include_buffers=True)
+            except (OSError, subprocess.CalledProcessError) as exc:
+                print(f"      Binary export unavailable; keeping geometry unknown: {exc}", flush=True)
+            else:
+                # Use this export for both commands and binary references.
+                xml_path = geometry_xml
+                buffer_zip = geometry_zip
+        elif driver == "Vulkan" and source_path.name.lower().endswith(".zip.xml"):
+            buffer_zip = source_path.with_suffix("")
         print("[2/4] Parse draw calls and texture bindings", flush=True)
         probe_json, probe_md = run_probe(xml_path)
         data = json.loads(probe_json.read_text(encoding="utf-8"))
         rows_path = find_precomputed_rows(source_path, out_dir)
-        if detect_driver(xml_path) == "D3D11" and rows_path is not None:
+        if driver == "D3D11" and rows_path is not None:
             data["enhanced_draws"] = data_from_precomputed_rows(rows_path)["draws"]
             data["enhanced_merged_draws"] = merge_enhanced_rows(data, data["enhanced_draws"])
         prepare_offline_rows(data)
         data["replay_error"] = replay_error
-        if detect_driver(xml_path) == "Vulkan":
-            offline_mapping = reconstruct_vulkan_events(data, xml_path)
+        if driver == "Vulkan":
+            offline_mapping = reconstruct_vulkan_events(data, xml_path, buffer_zip)
         if offline_mapping is not None:
             print(f"      Offline Vulkan EIDs: {len(data['draws'])} draw executions, "
                   f"{len(data['dispatches'])} dispatches; rules from RenderDoc "
@@ -1532,7 +1588,7 @@ def main():
         detail_md = write_category_detail_md(source_path.stem, out_dir, by_category)
         write_index_md(source_path.stem, out_dir, source_path, xml_path, probe_md, probe_json, summary_csv, detail_csv, detail_md, html_report)
     else:
-        for path in (probe_md, probe_json, replay_csv):
+        for path in (probe_md, probe_json, replay_csv, *generated_geometry_paths):
             if path is None:
                 continue
             try:
@@ -1540,10 +1596,8 @@ def main():
             except FileNotFoundError:
                 pass
         if source_path.suffix.lower() == ".rdc":
-            try:
-                xml_path.unlink()
-            except FileNotFoundError:
-                pass
+            for path in {xml_path, out_dir / f"{source_path.stem}.xml"}:
+                path.unlink(missing_ok=True)
 
     print("")
     print("Done.")

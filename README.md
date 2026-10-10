@@ -9,20 +9,27 @@
 - 纹理和 Mesh 名从每个 EID 的管线状态读取，分类继续优先选择 `_D` 纹理，保留 HLOD / PCG HLOD 特殊分类。
 - `Unique Vertex Index`（原 `Unique refs`）是每次绘制引用的不同顶点索引数量，乘以实例数后按分类累加。读取索引时使用当前 EID 的缓冲区、绑定偏移、首索引和索引宽度，并排除 primitive restart。它不是场景整体去重顶点数，也不是 GPU 实际执行的 VS 次数。页面优先显示此项。
 - `Vertex Index`（原 `Submitted`）是每次绘制的索引数（索引绘制）或顶点数（非索引绘制），乘以有效实例数，包含重复引用。普通 Draw 的实例数按 1 处理，实例化 Draw 的 0 实例则保留为 0。
-- 索引数据读取不完整或单次读取超过 64 MiB 时，Unique Vertex Index 显示 `Unknown`。汇总同时显示未知项数量，不将未知值作为完整的 0。
+- 官方回放中，索引数据读取不完整或单次读取超过 64 MiB 时，Unique Vertex Index 显示 `Unknown`。汇总同时显示未知项数量，不将未知值作为完整的 0。
 - Vulkan 回放失败时，会尝试按官方源码规则离线重建 EID。当前支持序列化版本 25 / 32 中已覆盖的普通主命令缓冲区指令，按提交顺序展开，重复提交保留多次执行，未提交的录制命令不计入执行数。页面标为 `EID (offline)`，不冒充官方回放结果。
 - 离线规则固定参照随包 RenderDoc `050034a0faa37d606ce1b8cf677dba4bc36984ea`。已用本机 Vulkan 测试截帧与官方回放逐动作核对，覆盖交错录制、乱序提交、重复提交、重新录制及空命令缓冲区列表。手机截帧仍需要与同版本 RenderDoc 的实际结果核验。
 - 遇到未覆盖指令、次级命令缓冲区、多重/间接绘制、版本差异或数据不完整时，整份 EID 映射停止输出，日志说明首个阻断位置；报告退回录制命令数及 `chunk:编号`，不会继续编造编号。D3D11 官方回放流程不变。
-- 离线 EID 重建不等于重放 GPU：纹理仍来自离线绑定解析，动态描述符等情况仍有局限；未读取索引缓冲区时 `Unique Vertex Index` 仍为未知，间接绘制的几何数量也为未知。
+- Vulkan 离线分析现在会额外导出 `XML+ZIP`，读取索引二进制初始内容，并按重建的事件顺序恢复有完整数据的 CPU 上传。根据绑定偏移、firstIndex、索引格式、primitive restart 和实例数计算 `Unique Vertex Index`；非索引绘制直接使用命令参数。普通 XML 没有二进制数据，不能凭索引数量推算去重数。
+- 离线计算采用保守策略：索引范围与潜在 GPU 可写缓冲区或其别名重叠、作为 GPU 拷贝/更新目标、共享未追踪的图像内存，或 CPU 上传/初始数据不完整时，仍显示 `Unknown`。GPU 风险按整帧排除，即使写入发生在绘制之后也不冒险使用旧数据。设备地址、稀疏/扩展内存绑定、无法确认的 primitive restart 状态不猜测；不执行着色器，不重放 GPU 拷贝。
+- 离线读取上限为每个二进制块 128 MiB、单 Draw 索引范围 16 MiB，缓存最多 256 MiB；超限保留未知。页面显示已知/未知 Draw 数、原因汇总和数量单元格的来源提示；JSON/CSV 保留每条 Draw 的计算来源及未知原因。`已知数 (+N unknown draws)` 不是完整总量。
+- 离线 EID 重建不等于重放 GPU：纹理仍来自离线绑定解析，动态描述符等情况仍有局限；间接绘制的几何数量也仍可能未知。
 - 无界面回放仍需要兼容的 GPU/驱动。手机 Vulkan 的 ASTC 扩展不兼容无法通过命令行绕过。
 
 排查时加 `--keep-intermediate` 可保留官方动作 CSV 和归一化 JSON。`--offline` 可直接跳过回放。官方 CSV 中 `numInstances` 是未经修改的 API 原值；归一化 JSON 中 `instance_count` 是结合 Instanced 标志计算后的有效实例数。
 
 离线 Vulkan 重建成功时，`--keep-intermediate` 还会保留 `*_offline_eid_map.json`，逐事件记录 EID、chunkIndex、原始/烘焙命令缓冲区、提交位置及执行次数索引，方便核对。也可以单独运行 `runtime\python\python.exe analyzer\vulkan_offline_events.py capture.xml events.json`。此命令不创建 GPU 设备。
 
+二进制导出会增加耗时和临时磁盘占用。默认完成后删除本次生成的 XML/ZIP，只保留 HTML 与日志；`--keep-intermediate` 会保留 `*_geometry.zip.xml` / `*_geometry.zip`，便于复核。二进制导出失败不会阻断原有纹理/EID 报告，只让无法读取的索引统计保持未知。
+
 开发者可运行 `native\BuildExporter.cmd -RenderDocSource D:\workspace\renderdoc` 重新编译导出器，需要 Visual Studio C++ 工具。构建脚本自动选用与内置 DLL 提交版本完全一致的头文件，运行时也会校验版本。
 
 回归测试：`runtime\python\python.exe -m unittest discover -s analyzer -p test*.py`。开发者还可在 VS x64 开发者命令行运行 `powershell -ExecutionPolicy Bypass -File native\tests\build_vulkan_fixture.ps1 -RenderDocSource D:\workspace\renderdoc`，生成无窗口 Vulkan 测试截帧，并自动比较官方回放与离线结果；该集成测试需要本机 Vulkan GPU，普通离线分析不需要。
+
+该集成测试默认验证静态索引，还可加 `-Scenario cpu` 或 `-Scenario restart` 分别验证 CPU 上传后重复提交的索引变化及 primitive restart 剔除，逐 Draw 对照官方 EID 和 Unique Vertex Index。
 
 ## 仓库包含什么
 
