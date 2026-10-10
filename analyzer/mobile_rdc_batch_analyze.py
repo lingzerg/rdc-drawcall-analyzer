@@ -112,6 +112,21 @@ def prepare_offline_rows(data):
     data["analysis_mode"] = "offline_commands"
 
 
+def reconstruct_vulkan_events(data, xml_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("vulkan_events", Path(__file__).with_name("vulkan_offline_events.py"))
+    events = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(events)
+    try:
+        mapping = events.reconstruct(ET.parse(xml_path).getroot())
+        events.apply_to_analysis(data, mapping)
+        return mapping
+    except events.UnsupportedCapture as exc:
+        data["offline_eid_error"] = str(exc)
+        print(f"      Offline Vulkan EID unavailable: {exc}", flush=True)
+        return None
+
+
 def run_replay_export(rdc_path, csv_path):
     exporter = Path(__file__).resolve().parent.parent / "third_party/renderdoc/rdc_replay_export.exe"
     if not exporter.exists():
@@ -967,13 +982,22 @@ def html_texture_aggregate_header(eid_label="EID/chunkIndex"):
 def write_html_report(stem, out_dir, source_path, data, by_category):
     html_path = out_dir / f"{stem}_analysis.html"
     rows = data.get("draws", [])
-    offline = data.get("analysis_mode") != "official_replay"
+    reconstructed = data.get("analysis_mode") == "offline_vulkan_events"
+    offline = data.get("analysis_mode") not in {"official_replay", "offline_vulkan_events"}
     count_label = "Recorded draw commands" if offline else "Draw calls"
     accuracy_note = (
         "Offline: EID unavailable. Counts describe recorded commands; repeated submissions and multi-draw execution counts are not verified. "
         + str(data.get("replay_error") or "").split("\n", 1)[0]
         if offline else "Official replay: EIDs and draw parameters come from RenderDoc's action tree."
     )
+    if reconstructed:
+        accuracy_note = (
+            "Vulkan 离线重建 EID：按命令缓冲区提交顺序编号，重复提交分别计数。"
+            "未在此截帧上完成 GPU 回放，待与同版本 RenderDoc 核对。"
+            "纹理来自离线绑定解析；Unique Vertex Index 未读取索引缓冲区时仍为 Unknown。"
+        )
+    elif offline and data.get("offline_eid_error"):
+        accuracy_note += " Offline EID: " + data["offline_eid_error"]
     enhanced_rows = data.get("enhanced_draws", [])
     dispatches = data.get("dispatches", [])
     command_counts = Counter(data.get("command_counts", {}))
@@ -987,9 +1011,9 @@ def write_html_report(stem, out_dir, source_path, data, by_category):
     estimated_meta = data.get("estimated_event_id_map") or {}
     estimated_mapped = data.get("estimated_event_id_mapped_draws") or 0
     if event_mapped:
-        eid_label = "EID"
+        eid_label = "EID (offline)" if reconstructed else "EID"
         eid_source = str(event_meta.get("source") or "renderdoc_actionmap")
-        eid_card_label = "Official EID mapped draws"
+        eid_card_label = "Offline EID mapped draws" if reconstructed else "Official EID mapped draws"
         eid_card_value = event_mapped
     elif estimated_mapped:
         eid_label = "estimated EID"
@@ -1427,12 +1451,12 @@ def write_index_md(stem, out_dir, source_path, xml_path, probe_md, probe_json, s
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Offline mobile Vulkan RDC draw/texture analyzer.")
+    parser = argparse.ArgumentParser(description="Automatic RDC draw/texture analyzer: official replay with API-specific offline fallback.")
     parser.add_argument("capture", nargs="?", help="Path to .rdc or already exported .xml")
     parser.add_argument("--renderdoccmd", help="Path to renderdoccmd.exe")
     parser.add_argument("--force-convert", action="store_true", help="Regenerate XML even if it exists")
     parser.add_argument("--keep-intermediate", action="store_true", help="Keep XML/JSON/CSV/MD helper files")
-    parser.add_argument("--offline", action="store_true", help="Skip GPU replay; EIDs and indirect geometry remain unknown")
+    parser.add_argument("--offline", action="store_true", help="Skip GPU replay; reconstruct supported Vulkan EIDs from submissions")
     args = parser.parse_args()
 
     raw = args.capture or input("Drag/paste .rdc path: ")
@@ -1450,6 +1474,7 @@ def main():
     print(f"RenderDoc command: {renderdoccmd}")
 
     data = None
+    offline_mapping = None
     replay_error = "Replay skipped (--offline or XML input)"
     probe_json = probe_md = replay_csv = None
     xml_path = source_path if source_path.suffix.lower() == ".xml" else out_dir / f"{source_path.stem}.xml"
@@ -1483,7 +1508,14 @@ def main():
             data["enhanced_merged_draws"] = merge_enhanced_rows(data, data["enhanced_draws"])
         prepare_offline_rows(data)
         data["replay_error"] = replay_error
-        print("      Offline command counts only. Official EID unavailable; showing chunkIndex.", flush=True)
+        if detect_driver(xml_path) == "Vulkan":
+            offline_mapping = reconstruct_vulkan_events(data, xml_path)
+        if offline_mapping is not None:
+            print(f"      Offline Vulkan EIDs: {len(data['draws'])} draw executions, "
+                  f"{len(data['dispatches'])} dispatches; rules from RenderDoc "
+                  f"{offline_mapping['renderdoc_revision'][:12]}", flush=True)
+        else:
+            print("      Offline command counts only. Official EID unavailable; showing chunkIndex.", flush=True)
 
     print("[3/4] Write HTML report", flush=True)
     by_category = build_category_groups(data)
@@ -1491,6 +1523,9 @@ def main():
 
     print("[4/4] Cleanup", flush=True)
     if args.keep_intermediate:
+        if offline_mapping is not None:
+            event_path = out_dir / f"{source_path.stem}_offline_eid_map.json"
+            event_path.write_text(json.dumps(offline_mapping, ensure_ascii=False, indent=2), encoding="utf-8")
         probe_json = out_dir / f"{source_path.stem}_analysis_data.json"
         probe_json.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         summary_csv, detail_csv, by_category = write_csvs(data, source_path.stem, out_dir)

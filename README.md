@@ -10,12 +10,19 @@
 - `Unique Vertex Index`（原 `Unique refs`）是每次绘制引用的不同顶点索引数量，乘以实例数后按分类累加。读取索引时使用当前 EID 的缓冲区、绑定偏移、首索引和索引宽度，并排除 primitive restart。它不是场景整体去重顶点数，也不是 GPU 实际执行的 VS 次数。页面优先显示此项。
 - `Vertex Index`（原 `Submitted`）是每次绘制的索引数（索引绘制）或顶点数（非索引绘制），乘以有效实例数，包含重复引用。普通 Draw 的实例数按 1 处理，实例化 Draw 的 0 实例则保留为 0。
 - 索引数据读取不完整或单次读取超过 64 MiB 时，Unique Vertex Index 显示 `Unknown`。汇总同时显示未知项数量，不将未知值作为完整的 0。
-- 回放失败时仍可分析 XML 纹理分类，但显示的是录制的绘制命令数，不保证等于实际执行次数。此时不再推算 EID，显示 `chunk:编号`；间接绘制的几何数量标为未知。
+- Vulkan 回放失败时，会尝试按官方源码规则离线重建 EID。当前支持序列化版本 25 / 32 中已覆盖的普通主命令缓冲区指令，按提交顺序展开，重复提交保留多次执行，未提交的录制命令不计入执行数。页面标为 `EID (offline)`，不冒充官方回放结果。
+- 离线规则固定参照随包 RenderDoc `050034a0faa37d606ce1b8cf677dba4bc36984ea`。已用本机 Vulkan 测试截帧与官方回放逐动作核对，覆盖交错录制、乱序提交、重复提交、重新录制及空命令缓冲区列表。手机截帧仍需要与同版本 RenderDoc 的实际结果核验。
+- 遇到未覆盖指令、次级命令缓冲区、多重/间接绘制、版本差异或数据不完整时，整份 EID 映射停止输出，日志说明首个阻断位置；报告退回录制命令数及 `chunk:编号`，不会继续编造编号。D3D11 官方回放流程不变。
+- 离线 EID 重建不等于重放 GPU：纹理仍来自离线绑定解析，动态描述符等情况仍有局限；未读取索引缓冲区时 `Unique Vertex Index` 仍为未知，间接绘制的几何数量也为未知。
 - 无界面回放仍需要兼容的 GPU/驱动。手机 Vulkan 的 ASTC 扩展不兼容无法通过命令行绕过。
 
 排查时加 `--keep-intermediate` 可保留官方动作 CSV 和归一化 JSON。`--offline` 可直接跳过回放。官方 CSV 中 `numInstances` 是未经修改的 API 原值；归一化 JSON 中 `instance_count` 是结合 Instanced 标志计算后的有效实例数。
 
+离线 Vulkan 重建成功时，`--keep-intermediate` 还会保留 `*_offline_eid_map.json`，逐事件记录 EID、chunkIndex、原始/烘焙命令缓冲区、提交位置及执行次数索引，方便核对。也可以单独运行 `runtime\python\python.exe analyzer\vulkan_offline_events.py capture.xml events.json`。此命令不创建 GPU 设备。
+
 开发者可运行 `native\BuildExporter.cmd -RenderDocSource D:\workspace\renderdoc` 重新编译导出器，需要 Visual Studio C++ 工具。构建脚本自动选用与内置 DLL 提交版本完全一致的头文件，运行时也会校验版本。
+
+回归测试：`runtime\python\python.exe -m unittest discover -s analyzer -p test*.py`。开发者还可在 VS x64 开发者命令行运行 `powershell -ExecutionPolicy Bypass -File native\tests\build_vulkan_fixture.ps1 -RenderDocSource D:\workspace\renderdoc`，生成无窗口 Vulkan 测试截帧，并自动比较官方回放与离线结果；该集成测试需要本机 Vulkan GPU，普通离线分析不需要。
 
 ## 仓库包含什么
 
@@ -23,9 +30,7 @@
 
 已内置内容：
 
-- `AnalyzeRDC.cmd`：主入口，推荐使用。
-- `AnalyzeMobileRDC.cmd`：移动端截帧入口，本质上调用同一个自动分析器。
-- `AnalyzePCRDC.cmd`：PC 截帧入口，本质上调用同一个自动分析器。
+- `AnalyzeRDC.cmd`：唯一入口，自动处理 PC 和移动端截帧，不需要选择平台。
 - `runtime/python`：内置 Python 运行时。
 - `third_party/renderdoc`：RenderDoc 命令行运行集，包含官方回放导出器和离线转换工具。
 - `analyzer`：分析脚本，包含 Vulkan/mobile 和 D3D11/PC 两条解析路径。
@@ -48,6 +53,8 @@ AnalyzeRDC.cmd
 然后把 `.rdc` 文件路径粘贴进去，或者把 `.rdc` 文件拖进命令行窗口后按回车。
 
 也可以直接把 `.rdc` 文件拖到 `AnalyzeRDC.cmd` 图标上运行。
+
+程序优先尝试官方无界面回放；无法回放时，读取截帧内的图形 API 标识，D3D11 使用对应的离线解析器，Vulkan 使用 Vulkan 离线解析器并尝试重建 EID。分支不依据文件名，也不会把所有 Vulkan 截帧都认作手机截帧。其他 API 在回放失败后会提示离线解析暂不支持，不会误套已有分支。旧的两个平台专用 CMD 已移除。
 
 ## 输出结果
 

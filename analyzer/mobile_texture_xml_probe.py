@@ -223,16 +223,25 @@ def main():
 
     rows = []
     dispatch_rows = []
-    current_sets = {}
+    command_states = {}
     draw_index = 0
     dispatch_index = 0
-    current_renderpass = 0
-    renderpass_open = False
-    marker_stack = []
+    next_renderpass = 0
 
     for chunk in root.findall("./chunks/chunk"):
         name = chunk.attrib.get("name", "")
         chunk_index = int(chunk.attrib.get("chunkIndex", "-1"))
+        cb = direct_resource_value(chunk, "commandBuffer", "VkCommandBuffer") or direct_resource_value(chunk, "CommandBuffer", "VkCommandBuffer")
+        if name == "vkBeginCommandBuffer" or cb not in command_states:
+            command_states[cb] = {"sets": defaultdict(dict), "markers": [], "renderpass": 0, "open": False}
+        state = command_states[cb]
+        # Command buffers may be recorded on interleaved threads. Graphics and
+        # compute bindings also have independent state within each recording.
+        bind_point = child_text(chunk, "enum", "pipelineBindPoint") or "0"
+        current_sets = state["sets"][bind_point if name == "vkCmdBindDescriptorSets" else "0"]
+        marker_stack = state["markers"]
+        current_renderpass = state["renderpass"]
+        renderpass_open = state["open"]
         if name.startswith("vkCmd"):
             stats[f"cmd::{name}"] += 1
 
@@ -293,11 +302,12 @@ def main():
                     current_sets[first_set + i] = descriptor_set
 
         elif name == "vkCmdBeginRenderPass":
-            current_renderpass += 1
-            renderpass_open = True
+            next_renderpass += 1
+            state["renderpass"] = next_renderpass
+            state["open"] = True
 
         elif name == "vkCmdEndRenderPass":
-            renderpass_open = False
+            state["open"] = False
 
         elif name in {"vkCmdDebugMarkerBeginEXT", "vkCmdBeginDebugUtilsLabelEXT"}:
             marker_stack.append(marker_label(chunk) or f"marker_{chunk_index}")

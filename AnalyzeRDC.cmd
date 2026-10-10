@@ -6,7 +6,6 @@ set "ROOT=%~dp0"
 set "SCRIPT=%ROOT%analyzer\mobile_rdc_batch_analyze.py"
 set "PY=%ROOT%runtime\python\python.exe"
 set "BUNDLED_RD=%ROOT%third_party\renderdoc\renderdoccmd.exe"
-set "RD_ARG="
 
 if not exist "%PY%" (
   set "PY=python"
@@ -14,7 +13,7 @@ if not exist "%PY%" (
 
 echo ==========================================
 echo RenderDoc RDC texture/draw analyzer
-echo Auto mode: Vulkan mobile / D3D11 PC
+echo Auto mode: detect capture API - no platform selection needed
 echo ==========================================
 echo.
 echo Output folder:
@@ -55,7 +54,6 @@ if defined RDC_ANALYZER_RENDERDOCCMD (
   if exist "%RDC_ANALYZER_RENDERDOCCMD%" (
     echo RenderDoc runtime: override
     echo   %RDC_ANALYZER_RENDERDOCCMD%
-    set "RD_ARG=--renderdoccmd=%RDC_ANALYZER_RENDERDOCCMD%"
   ) else (
     echo [ERROR] RDC_ANALYZER_RENDERDOCCMD points to a missing file:
     echo   %RDC_ANALYZER_RENDERDOCCMD%
